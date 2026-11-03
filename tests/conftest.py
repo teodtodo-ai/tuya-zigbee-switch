@@ -139,6 +139,7 @@ class ZCLCommandEvent:
     cluster: int
     cmd: int
     data: bytes
+    cluster_specific: bool = True
 
     @classmethod
     def from_event(cls, evt: Event) -> "ZCLCommandEvent":
@@ -147,6 +148,7 @@ class ZCLCommandEvent:
             cluster=int(evt.payload["cluster"], 16),
             cmd=int(evt.payload["cmd"], 16),
             data=bytes.fromhex(evt.payload["data_hex"]),
+            cluster_specific=evt.payload.get("cs", "1") != "0",
         )
 
 
@@ -337,12 +339,17 @@ class Device:
         cmd: int | None = None,
         timeout: float = 2.0,
         interval: float = 0.05,
+        include_global: bool = False,
     ) -> ZCLCommandEvent:
+        # Global commands (e.g. Read Attributes) are skipped by default so
+        # they are not mistaken for cluster commands with the same id.
         def _find_event() -> ZCLCommandEvent | None:
             for e in self._events:
                 if e.kind != "zcl_cmd_send":
                     continue
                 event = ZCLCommandEvent.from_event(e)
+                if not include_global and not event.cluster_specific:
+                    continue
                 if (
                     event.ep == ep
                     and event.cluster == cluster
@@ -367,13 +374,18 @@ class Device:
         wait_for(_announce_sent, timeout=timeout, interval=interval)
 
     def zcl_list_cmds(
-        self, endpoint: int | None = None, cluster: int | None = None
+        self,
+        endpoint: int | None = None,
+        cluster: int | None = None,
+        include_global: bool = False,
     ) -> list[ZCLCommandEvent]:
         res = []
         for evt in self._events:
             if evt.kind != "zcl_cmd_send":
                 continue
             e = ZCLCommandEvent.from_event(evt)
+            if not include_global and not e.cluster_specific:
+                continue
             if (endpoint is None or e.ep == endpoint) and (
                 cluster is None or e.cluster == cluster
             ):

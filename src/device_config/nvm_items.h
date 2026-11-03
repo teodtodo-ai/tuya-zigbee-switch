@@ -28,4 +28,8 @@
 #define NV_ITEM_MULTI_PRESS_RESET_COUNT    33
 #define NV_ITEM_POLL_CONTROL_CONFIG        34
 
+// Custom (fork) items, kept well away from upstream's range so an upstream
+// update can never reuse them. One item per switch.
+#define NV_ITEM_SWITCH_DIMMING_CONFIG(switch_idx)    (0x40 + (switch_idx))
+
 #endif /* DEVICE_CONFIG_NVM_ITEMS_H_ */

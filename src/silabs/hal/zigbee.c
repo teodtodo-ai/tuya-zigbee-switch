@@ -173,6 +173,14 @@ void hal_zigbee_register_on_zcl_activity_callback(
     zcl_activity_callback = callback;
 }
 
+// Read Attributes Response forwarding is not implemented on Silabs yet.
+// The callback is never invoked, so features relying on it fall back to
+// their previous behaviour.
+void hal_zigbee_register_on_read_rsp_callback(
+    hal_zigbee_read_rsp_callback_t callback) {
+    (void)callback;
+}
+
 sl_zigbee_af_status_t sl_zigbee_af_external_attribute_read_cb(
     uint8_t endpoint, sl_zigbee_af_cluster_id_t clusterId,
     sl_zigbee_af_attribute_metadata_t *attributeMetadata,

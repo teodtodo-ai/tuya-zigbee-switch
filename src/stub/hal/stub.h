@@ -35,6 +35,9 @@ stub_zigbee_simulate_command_without_activity(uint8_t endpoint,
                                               uint8_t command_id,
                                               void *payload,
                                               uint16_t payload_len);
+void stub_zigbee_simulate_read_rsp(uint8_t endpoint, uint16_t cluster_id,
+                                   uint16_t attribute_id, uint8_t status,
+                                   uint8_t data_type, const uint8_t *value);
 void stub_simulate_zigbee_attribute_write(uint8_t endpoint, uint16_t cluster_id,
                                           uint16_t attribute_id);
 

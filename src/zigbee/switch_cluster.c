@@ -8,6 +8,7 @@
 #include "hal/printf_selector.h"
 #include "hal/system.h"
 #include "hal/tasks.h"
+#include "hal/timer.h"
 #include "relay_cluster.h"
 #include "zigbee_commands.h"
 
@@ -25,6 +26,23 @@ extern zigbee_relay_cluster relay_clusters[];
 extern uint8_t relay_clusters_cnt;
 extern zigbee_switch_cluster switch_clusters[];
 extern uint8_t switch_clusters_cnt;
+
+// Smart long-press dimming (fork)
+#define DIMMING_THRESHOLD_DEFAULT_PCT    60
+#define DIMMING_THRESHOLD_MAX_PCT        100
+// A new long press this soon after the previous one ended keeps its direction
+#define DIMMING_CONTINUE_WINDOW_MS       3000
+#define LAMP_LEVEL_MIN                   1
+#define LAMP_LEVEL_MAX                   254
+#define LAMP_STATE_ONOFF_VALID           0x01
+#define LAMP_STATE_LEVEL_VALID           0x02
+
+typedef struct {
+    uint8_t threshold_pct;
+} zigbee_switch_dimming_config;
+
+static void switch_cluster_load_dimming_from_nv(zigbee_switch_cluster *cluster);
+static void switch_cluster_store_dimming_to_nv(zigbee_switch_cluster *cluster);
 
 void switch_cluster_on_button_press(zigbee_switch_cluster *cluster);
 void switch_cluster_on_button_release(zigbee_switch_cluster *cluster);
@@ -91,6 +109,7 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     switch_cluster_by_endpoint[endpoint->endpoint] = cluster;
     cluster->endpoint = endpoint->endpoint;
     switch_cluster_load_attrs_from_nv(cluster);
+    switch_cluster_load_dimming_from_nv(cluster);
 
     cluster->button->on_press =
         (ev_button_callback_t)switch_cluster_on_button_press;
@@ -117,11 +136,14 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
                ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->level_move_rate);
     SETUP_ATTR(7, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_BINDING_MODE,
                ZCL_DATA_TYPE_ENUM8, ATTR_WRITABLE, cluster->binded_mode);
+    SETUP_ATTR(8, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE,
+               cluster->dimming_threshold_pct);
 
     // Configuration
     endpoint->clusters[endpoint->cluster_count].cluster_id =
         ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG;
-    endpoint->clusters[endpoint->cluster_count].attribute_count = 8;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 9;
     endpoint->clusters[endpoint->cluster_count].attributes      = cluster->attr_infos;
     endpoint->clusters[endpoint->cluster_count].is_server       = 1;
     endpoint->cluster_count++;
@@ -324,21 +346,128 @@ void switch_cluster_level_stop(zigbee_switch_cluster *cluster) {
     hal_zigbee_send_cmd_to_bindings(&c);
 }
 
+// Ask bound lamp(s) for their current state. Answers arrive asynchronously in
+// switch_cluster_on_read_rsp() and are only used for this same press.
+static void switch_cluster_request_lamp_state(zigbee_switch_cluster *cluster) {
+    cluster->lamp_state_valid = 0;
+
+    if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
+        return;
+    }
+
+    hal_zigbee_cmd c = build_read_attr_cmd(cluster->endpoint, ZCL_CLUSTER_ON_OFF,
+                                           ZCL_ATTR_ONOFF);
+    hal_zigbee_send_cmd_to_bindings(&c);
+
+    c = build_read_attr_cmd(cluster->endpoint, ZCL_CLUSTER_LEVEL_CONTROL,
+                            ZCL_ATTR_LEVEL_CURRENT_LEVEL);
+    hal_zigbee_send_cmd_to_bindings(&c);
+}
+
+void switch_cluster_on_read_rsp(uint8_t endpoint, uint16_t cluster_id,
+                                uint16_t attribute_id, uint8_t status,
+                                uint8_t data_type, const uint8_t *value) {
+    if (endpoint >= sizeof(switch_cluster_by_endpoint) /
+        sizeof(switch_cluster_by_endpoint[0])) {
+        return;
+    }
+    zigbee_switch_cluster *cluster = switch_cluster_by_endpoint[endpoint];
+    if (cluster == NULL) {
+        return; // Not a switch endpoint (e.g. relay endpoint)
+    }
+
+    // Only store answers while a press is pending (button down, long press
+    // not started yet). The direction is decided at long-press start and the
+    // state is cleared on every new press, so later answers are never used.
+    if (cluster->mode == ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_TOGGLE ||
+        !cluster->button->pressed ||
+        cluster->multistate_state != MULTISTATE_PRESS) {
+        return;
+    }
+    if (status != ZCL_STATUS_SUCCESS || value == NULL) {
+        return; // e.g. coordinator answering "unsupported attribute"
+    }
+
+    if (cluster_id == ZCL_CLUSTER_ON_OFF && attribute_id == ZCL_ATTR_ONOFF &&
+        data_type == ZCL_DATA_TYPE_BOOLEAN) {
+        // With several bound lamps, first valid answer wins
+        if (!(cluster->lamp_state_valid & LAMP_STATE_ONOFF_VALID)) {
+            cluster->lamp_on           = value[0] ? 1 : 0;
+            cluster->lamp_state_valid |= LAMP_STATE_ONOFF_VALID;
+        }
+    } else if (cluster_id == ZCL_CLUSTER_LEVEL_CONTROL &&
+               attribute_id == ZCL_ATTR_LEVEL_CURRENT_LEVEL &&
+               data_type == ZCL_DATA_TYPE_UINT8) {
+        if (!(cluster->lamp_state_valid & LAMP_STATE_LEVEL_VALID)) {
+            cluster->lamp_level        = value[0];
+            cluster->lamp_state_valid |= LAMP_STATE_LEVEL_VALID;
+        }
+    }
+}
+
+static void switch_cluster_send_level_move(zigbee_switch_cluster *cluster,
+                                           uint8_t direction) {
+    hal_zigbee_cmd c = build_level_move_onoff_cmd(cluster->endpoint, direction,
+                                                  cluster->level_move_rate);
+
+    hal_zigbee_send_cmd_to_bindings(&c);
+    cluster->last_dim_direction = direction;
+    // Keep legacy alternation consistent: next fallback goes the other way
+    cluster->level_move_direction =
+        direction == ZCL_LEVEL_MOVE_DOWN ? ZCL_LEVEL_MOVE_UP : ZCL_LEVEL_MOVE_DOWN;
+}
+
 void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
     if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
         return;
     }
 
-    hal_zigbee_cmd c = build_level_move_onoff_cmd(cluster->endpoint,
-                                                  cluster->level_move_direction,
-                                                  cluster->level_move_rate);
-    hal_zigbee_send_cmd_to_bindings(&c);
+    uint8_t valid = cluster->lamp_state_valid;
 
-    if (cluster->level_move_direction == ZCL_LEVEL_MOVE_DOWN) {
-        cluster->level_move_direction = ZCL_LEVEL_MOVE_UP;
-    } else {
-        cluster->level_move_direction = ZCL_LEVEL_MOVE_DOWN;
+    if (!(valid & LAMP_STATE_ONOFF_VALID)) {
+        // No answer from the lamp: legacy behaviour, alternate direction
+        switch_cluster_send_level_move(cluster, cluster->level_move_direction);
+        return;
     }
+
+    if (!cluster->lamp_on) {
+        // Lamp is off: switch it on at minimum, then fade up
+        hal_zigbee_cmd c =
+            build_level_move_to_level_onoff_cmd(cluster->endpoint, LAMP_LEVEL_MIN);
+        hal_zigbee_send_cmd_to_bindings(&c);
+        switch_cluster_send_level_move(cluster, ZCL_LEVEL_MOVE_UP);
+        return;
+    }
+
+    uint8_t  direction;
+    uint32_t since_last = hal_millis() - cluster->last_dim_end_ms;
+
+    if (cluster->last_dim_valid && since_last <= DIMMING_CONTINUE_WINDOW_MS) {
+        // Re-grab shortly after release: keep going the same way
+        direction = cluster->last_dim_direction;
+    } else if (valid & LAMP_STATE_LEVEL_VALID) {
+        // level <= threshold% -> up, otherwise down
+        direction = ((uint16_t)cluster->lamp_level * 100 <=
+                     (uint16_t)cluster->dimming_threshold_pct * LAMP_LEVEL_MAX)
+                  ? ZCL_LEVEL_MOVE_UP
+                  : ZCL_LEVEL_MOVE_DOWN;
+    } else {
+        // Lamp on, level unknown: dim down
+        direction = ZCL_LEVEL_MOVE_DOWN;
+    }
+
+    // Never push against a limit we already sit at
+    if (valid & LAMP_STATE_LEVEL_VALID) {
+        if (direction == ZCL_LEVEL_MOVE_DOWN &&
+            cluster->lamp_level <= LAMP_LEVEL_MIN) {
+            direction = ZCL_LEVEL_MOVE_UP;
+        } else if (direction == ZCL_LEVEL_MOVE_UP &&
+                   cluster->lamp_level >= LAMP_LEVEL_MAX) {
+            direction = ZCL_LEVEL_MOVE_DOWN;
+        }
+    }
+
+    switch_cluster_send_level_move(cluster, direction);
 }
 
 void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
@@ -369,6 +498,9 @@ void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
     hal_zigbee_notify_attribute_changed(cluster->endpoint,
                                         ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
                                         ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+
+    // Must be after multistate_state = PRESS so answers are accepted
+    switch_cluster_request_lamp_state(cluster);
 }
 
 void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
@@ -401,6 +533,8 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
     } else {
         // This is end of long press, send zcl_level stop
         switch_cluster_level_stop(cluster);
+        cluster->last_dim_valid  = 1;
+        cluster->last_dim_end_ms = hal_millis();
     }
 
     cluster->multistate_state = MULTISTATE_NOT_PRESSED;
@@ -457,6 +591,14 @@ void synchronize_multistate_state(zigbee_switch_cluster *cluster) {
 void switch_cluster_on_write_attr(zigbee_switch_cluster *cluster,
                                   uint16_t attribute_id) {
     printf("Index at write attr: %d\r\n", cluster->switch_idx);
+    if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD) {
+        if (cluster->dimming_threshold_pct > DIMMING_THRESHOLD_MAX_PCT) {
+            cluster->dimming_threshold_pct = DIMMING_THRESHOLD_MAX_PCT;
+        }
+        // Stored in its own NV item; upstream switch config is untouched
+        switch_cluster_store_dimming_to_nv(cluster);
+        return;
+    }
     if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_RELAY_INDEX) {
         if (relay_clusters_cnt == 0) {
             cluster->relay_index = 0;
@@ -517,4 +659,33 @@ void switch_cluster_load_attrs_from_nv(zigbee_switch_cluster *cluster) {
                cluster->relay_index);
         cluster->relay_index = cluster->switch_idx + 1;
     }
+}
+
+// Smart dimming settings live in a separate NV item so the upstream
+// switch config item keeps its exact size and is never invalidated.
+static zigbee_switch_dimming_config dimming_nv_buffer;
+
+static void switch_cluster_store_dimming_to_nv(zigbee_switch_cluster *cluster) {
+    dimming_nv_buffer.threshold_pct = cluster->dimming_threshold_pct;
+    hal_nvm_write(NV_ITEM_SWITCH_DIMMING_CONFIG(cluster->switch_idx),
+                  sizeof(zigbee_switch_dimming_config),
+                  (uint8_t *)&dimming_nv_buffer);
+}
+
+static void switch_cluster_load_dimming_from_nv(zigbee_switch_cluster *cluster) {
+    cluster->dimming_threshold_pct = DIMMING_THRESHOLD_DEFAULT_PCT;
+
+    hal_nvm_status_t st = hal_nvm_read(
+        NV_ITEM_SWITCH_DIMMING_CONFIG(cluster->switch_idx),
+        sizeof(zigbee_switch_dimming_config), (uint8_t *)&dimming_nv_buffer);
+
+    if (st != HAL_NVM_SUCCESS) {
+        return; // Not stored yet (first boot on this firmware): default
+    }
+    if (dimming_nv_buffer.threshold_pct > DIMMING_THRESHOLD_MAX_PCT) {
+        printf("Invalid dimming threshold %d in NV, using default\r\n",
+               dimming_nv_buffer.threshold_pct);
+        return;
+    }
+    cluster->dimming_threshold_pct = dimming_nv_buffer.threshold_pct;
 }

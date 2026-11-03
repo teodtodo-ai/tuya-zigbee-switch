@@ -31,6 +31,7 @@ static hal_zigbee_network_status_t network_status =
     HAL_ZIGBEE_NETWORK_NOT_JOINED;
 static hal_attribute_change_callback_t attr_change_callback  = NULL;
 static hal_zcl_activity_callback_t     zcl_activity_callback = NULL;
+static hal_zigbee_read_rsp_callback_t  read_rsp_callback     = NULL;
 static uint32_t poll_rate_ms = 0;
 
 static stub_binding_t bindings[MAX_BINDINGS];
@@ -137,6 +138,27 @@ void hal_zigbee_register_on_zcl_activity_callback(
     io_log("ZIGBEE", "Registered ZCL activity callback");
 }
 
+void hal_zigbee_register_on_read_rsp_callback(
+    hal_zigbee_read_rsp_callback_t callback) {
+    read_rsp_callback = callback;
+    io_log("ZIGBEE", "Registered read response callback");
+}
+
+void stub_zigbee_simulate_read_rsp(uint8_t endpoint, uint16_t cluster_id,
+                                   uint16_t attribute_id, uint8_t status,
+                                   uint8_t data_type, const uint8_t *value) {
+    io_log("ZIGBEE",
+           "Simulating read rsp: ep=%d cluster=0x%04x attr=0x%04x status=0x%02x",
+           endpoint, cluster_id, attribute_id, status);
+    if (zcl_activity_callback != NULL) {
+        zcl_activity_callback();
+    }
+    if (read_rsp_callback != NULL) {
+        read_rsp_callback(endpoint, cluster_id, attribute_id, status, data_type,
+                          status == 0 ? value : NULL);
+    }
+}
+
 void hal_zigbee_set_poll_rate_ms(uint32_t new_poll_rate_ms) {
     poll_rate_ms = new_poll_rate_ms;
     io_log("ZIGBEE", "Set poll rate to %u ms", (unsigned)new_poll_rate_ms);
@@ -174,9 +196,10 @@ hal_zigbee_status_t hal_zigbee_send_cmd_to_bindings(const hal_zigbee_cmd *cmd) {
     char buffer[cmd->payload_len * 2 + 1];
     bytes_to_hexstr(cmd->payload, cmd->payload_len, buffer);
 
-    io_evt("zcl_cmd_send ep=%u cluster=0x%04X cmd=0x%02X len=%u data_hex=%s",
+    io_evt("zcl_cmd_send ep=%u cluster=0x%04X cmd=0x%02X len=%u data_hex=%s "
+           "cs=%u",
            cmd->endpoint, cmd->cluster_id, cmd->command_id, cmd->payload_len,
-           buffer);
+           buffer, cmd->cluster_specific);
 
     // Simulate sending to all relevant bindings
     int sent_count = 0;

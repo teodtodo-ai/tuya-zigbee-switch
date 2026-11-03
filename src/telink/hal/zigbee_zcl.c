@@ -27,6 +27,7 @@ static hal_zigbee_endpoint *hal_endpoints = NULL;
 static uint8_t hal_endpoints_cnt          = 0;
 static hal_attribute_change_callback_t attribute_change_callback = NULL;
 static hal_zcl_activity_callback_t     zcl_activity_callback     = NULL;
+static hal_zigbee_read_rsp_callback_t  read_rsp_callback         = NULL;
 
 static cluster_registerFunc_t get_register_func_by_cluster_id(u16 cluster_id) {
     if (cluster_id == ZCL_CLUSTER_GEN_BASIC) {
@@ -155,6 +156,26 @@ static void zcl_incoming_message_callback(zclIncoming_t *pInHdlrMsg) {
                                       pInHdlrMsg->msg->indInfo.cluster_id,
                                       writeCmd->attrList[i].attrID);
         }
+    } else if (pInHdlrMsg->hdr.cmd == ZCL_CMD_READ_RSP) {
+        // Answer to a Read Attributes we sent (e.g. bound lamp state).
+        // attrCmd is parsed and owned by the SDK; we only read from it.
+        if (read_rsp_callback == NULL) {
+            return;
+        }
+        zclReadRspCmd_t *rsp = (zclReadRspCmd_t *)pInHdlrMsg->attrCmd;
+        for (u8 i = 0; i < rsp->numAttr; i++) {
+            zclReadRspStatus_t *rec = &rsp->attrList[i];
+            if (rec->status == ZCL_STA_SUCCESS) {
+                read_rsp_callback(pInHdlrMsg->msg->indInfo.dst_ep,
+                                  pInHdlrMsg->msg->indInfo.cluster_id,
+                                  rec->attrID, rec->status, rec->dataType,
+                                  rec->data);
+            } else {
+                read_rsp_callback(pInHdlrMsg->msg->indInfo.dst_ep,
+                                  pInHdlrMsg->msg->indInfo.cluster_id,
+                                  rec->attrID, rec->status, 0, NULL);
+            }
+        }
     }
 }
 
@@ -282,6 +303,11 @@ hal_zigbee_send_report_attr(uint8_t endpoint, uint16_t cluster_id,
 void hal_zigbee_register_on_attribute_change_callback(
     hal_attribute_change_callback_t callback) {
     attribute_change_callback = callback;
+}
+
+void hal_zigbee_register_on_read_rsp_callback(
+    hal_zigbee_read_rsp_callback_t callback) {
+    read_rsp_callback = callback;
 }
 
 void hal_zigbee_register_on_zcl_activity_callback(hal_zcl_activity_callback_t callback) {

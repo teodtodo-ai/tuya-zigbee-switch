@@ -187,6 +187,30 @@ void hal_zigbee_register_on_zcl_activity_callback(
     hal_zcl_activity_callback_t callback);
 
 
+/**
+ * Function called for each attribute record of an incoming ZCL Read
+ * Attributes Response (e.g. answer from a bound lamp).
+ * @param endpoint Local (destination) endpoint the response arrived at
+ * @param cluster_id Cluster of the response
+ * @param attribute_id Attribute in this record
+ * @param status ZCL status of this record (0 = success)
+ * @param data_type ZCL data type (valid only when status == 0)
+ * @param value Pointer to raw little-endian value (NULL when status != 0)
+ */
+typedef void (*hal_zigbee_read_rsp_callback_t)(uint8_t endpoint,
+                                               uint16_t cluster_id,
+                                               uint16_t attribute_id,
+                                               uint8_t status,
+                                               uint8_t data_type,
+                                               const uint8_t *value);
+
+/**
+ * Register callback for incoming Read Attributes Responses.
+ * Platforms that do not support it simply never call the callback.
+ */
+void hal_zigbee_register_on_read_rsp_callback(
+    hal_zigbee_read_rsp_callback_t callback);
+
 /** Set end device poll rate in milliseconds
  *
  * No-op for routers.

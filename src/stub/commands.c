@@ -319,6 +319,48 @@ static int cmd_zcl_cmd_no_activity(int argc, char **argv) {
     return cmd_zcl_cmd_impl(argc, argv, false);
 }
 
+// Simulate an incoming Read Attributes Response record from a bound device.
+// Usage: zcl_read_rsp <ep:dec> <cluster:hex> <attr:hex> <status:hex>
+//                     <type:hex> [value bytes hex...]
+static int cmd_zcl_read_rsp(int argc, char **argv) {
+    if (argc < 6) {
+        fprintf(stderr, "Usage: zcl_read_rsp <ep:dec> <cluster:hex> <attr:hex> "
+                "<status:hex> <type:hex> [value:hex_bytes...]\n");
+        io_res_err("usage");
+        return -1;
+    }
+
+    uint8_t  ep;
+    uint16_t cluster, attr, status, type;
+
+    if (parse_u8_dec(argv[1], &ep) || parse_u16_hex(argv[2], &cluster) ||
+        parse_u16_hex(argv[3], &attr) || parse_u16_hex(argv[4], &status) ||
+        parse_u16_hex(argv[5], &type) || status > 0xFF || type > 0xFF) {
+        fprintf(stderr, "Bad args\n");
+        io_res_err("bad_args");
+        return -1;
+    }
+
+    uint8_t value[16] = { 0 };
+    int     value_len = 0;
+    for (int i = 6; i < argc && value_len < (int)sizeof(value); i++) {
+        char *e        = NULL;
+        long  byte_val = strtol(argv[i], &e, 16);
+        if (*argv[i] == '\0' || *e || byte_val < 0 || byte_val > 0xFF) {
+            fprintf(stderr, "Bad value byte: %s\n", argv[i]);
+            io_res_err("bad_value_byte=%s", argv[i]);
+            return -1;
+        }
+        value[value_len++] = (uint8_t)byte_val;
+    }
+
+    stub_zigbee_simulate_read_rsp(ep, cluster, attr, (uint8_t)status,
+                                  (uint8_t)type, value);
+    io_res_ok("ep=%d cluster=0x%04X attr=0x%04X status=0x%02X", ep, cluster,
+              attr, status);
+    return 0;
+}
+
 static int cmd_freeze_time(int argc, char **argv) {
     if (argc != 2) {
         fprintf(stderr, "Usage: freeze_time <0|1>\n");
@@ -391,6 +433,7 @@ static const SimpleReplCommand kCmds[] = {
     { "zcl_list_attrs",      cmd_zcl_list_attrs      },
     { "zcl_cmd",             cmd_zcl_cmd             },
     { "zcl_cmd_no_activity", cmd_zcl_cmd_no_activity },
+    { "zcl_read_rsp",        cmd_zcl_read_rsp        },
     { "freeze_time",         cmd_freeze_time         },
     { "step_time",           cmd_step_time           },
     { "set_battery_voltage", cmd_set_battery_voltage },

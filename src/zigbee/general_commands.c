@@ -31,4 +31,5 @@ static void zigbee_on_attr_change(uint8_t endpoint, uint16_t cluster_id,
 
 void init_global_attr_write_callback() {
     hal_zigbee_register_on_attribute_change_callback(zigbee_on_attr_change);
+    hal_zigbee_register_on_read_rsp_callback(switch_cluster_on_read_rsp);
 }
