@@ -31,5 +31,7 @@
 // Custom (fork) items, kept well away from upstream's range so an upstream
 // update can never reuse them. One item per switch.
 #define NV_ITEM_SWITCH_DIMMING_CONFIG(switch_idx)    (0x40 + (switch_idx))
+// Separate item so adding it did not change the size of the item above
+#define NV_ITEM_SWITCH_DIMMING_WINDOW(switch_idx)    (0x48 + (switch_idx))
 
 #endif /* DEVICE_CONFIG_NVM_ITEMS_H_ */

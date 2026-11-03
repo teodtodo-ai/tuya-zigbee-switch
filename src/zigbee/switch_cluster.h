@@ -25,7 +25,7 @@ typedef struct {
     uint8_t              relay_index;
     uint8_t              binded_mode;
     button_t *           button;
-    hal_zigbee_attribute attr_infos[9];
+    hal_zigbee_attribute attr_infos[10];
     uint16_t             multistate_state;
     hal_zigbee_attribute multistate_attr_infos[4];
     uint8_t              level_move_rate;
@@ -34,8 +34,10 @@ typedef struct {
 
     // Smart long-press dimming (fork). State of the bound lamp is read on
     // every press and only trusted for that same press.
-    uint8_t              dimming_threshold_pct; // persisted, 0..100
-    uint8_t              lamp_state_valid;      // bitmask, see .c
+    uint8_t              dimming_threshold_pct;   // persisted, 0..100
+    uint16_t             dimming_reset_window_ms; // persisted, 0..5000
+    uint8_t              dim_regrab;              // this press is a re-grab
+    uint8_t              lamp_state_valid;        // bitmask, see .c
     uint8_t              lamp_on;
     uint8_t              lamp_level;
     uint8_t              last_dim_valid;

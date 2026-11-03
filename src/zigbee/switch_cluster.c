@@ -28,21 +28,31 @@ extern zigbee_switch_cluster switch_clusters[];
 extern uint8_t switch_clusters_cnt;
 
 // Smart long-press dimming (fork)
-#define DIMMING_THRESHOLD_DEFAULT_PCT    60
-#define DIMMING_THRESHOLD_MAX_PCT        100
-// A new long press this soon after the previous one ended keeps its direction
-#define DIMMING_CONTINUE_WINDOW_MS       3000
-#define LAMP_LEVEL_MIN                   1
-#define LAMP_LEVEL_MAX                   254
-#define LAMP_STATE_ONOFF_VALID           0x01
-#define LAMP_STATE_LEVEL_VALID           0x02
+#define DIMMING_THRESHOLD_DEFAULT_PCT      60
+#define DIMMING_THRESHOLD_MAX_PCT          100
+// Pressing again within this window after a dim ended keeps its direction.
+// 0 disables the rule (threshold always decides).
+#define DIMMING_RESET_WINDOW_DEFAULT_MS    1500
+#define DIMMING_RESET_WINDOW_MAX_MS        5000
+#define LAMP_LEVEL_MIN                     1
+#define LAMP_LEVEL_MAX                     254
+#define LAMP_STATE_ONOFF_VALID             0x01
+#define LAMP_STATE_LEVEL_VALID             0x02
 
 typedef struct {
     uint8_t threshold_pct;
 } zigbee_switch_dimming_config;
 
+typedef struct {
+    uint16_t reset_window_ms;
+} zigbee_switch_dimming_window_config;
+
 static void switch_cluster_load_dimming_from_nv(zigbee_switch_cluster *cluster);
 static void switch_cluster_store_dimming_to_nv(zigbee_switch_cluster *cluster);
+static void switch_cluster_store_dimming_window_to_nv(
+    zigbee_switch_cluster *cluster);
+static void switch_cluster_load_dimming_window_from_nv(
+    zigbee_switch_cluster *cluster);
 
 void switch_cluster_on_button_press(zigbee_switch_cluster *cluster);
 void switch_cluster_on_button_release(zigbee_switch_cluster *cluster);
@@ -139,11 +149,14 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     SETUP_ATTR(8, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD,
                ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE,
                cluster->dimming_threshold_pct);
+    SETUP_ATTR(9, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_RESET_WINDOW,
+               ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE,
+               cluster->dimming_reset_window_ms);
 
     // Configuration
     endpoint->clusters[endpoint->cluster_count].cluster_id =
         ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG;
-    endpoint->clusters[endpoint->cluster_count].attribute_count = 9;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 10;
     endpoint->clusters[endpoint->cluster_count].attributes      = cluster->attr_infos;
     endpoint->clusters[endpoint->cluster_count].is_server       = 1;
     endpoint->cluster_count++;
@@ -439,11 +452,10 @@ void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
         return;
     }
 
-    uint8_t  direction;
-    uint32_t since_last = hal_millis() - cluster->last_dim_end_ms;
+    uint8_t direction;
 
-    if (cluster->last_dim_valid && since_last <= DIMMING_CONTINUE_WINDOW_MS) {
-        // Re-grab shortly after release: keep going the same way
+    if (cluster->dim_regrab) {
+        // Pressed again shortly after the last dim: keep going the same way
         direction = cluster->last_dim_direction;
     } else if (valid & LAMP_STATE_LEVEL_VALID) {
         // level <= threshold% -> up, otherwise down
@@ -498,6 +510,13 @@ void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
     hal_zigbee_notify_attribute_changed(cluster->endpoint,
                                         ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
                                         ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+
+    // Re-grab is measured from the release of the last dim to this press,
+    // so the 800 ms long-press delay does not eat into the window.
+    cluster->dim_regrab = cluster->last_dim_valid &&
+                          cluster->dimming_reset_window_ms > 0 &&
+                          (hal_millis() - cluster->last_dim_end_ms) <=
+                          cluster->dimming_reset_window_ms;
 
     // Must be after multistate_state = PRESS so answers are accepted
     switch_cluster_request_lamp_state(cluster);
@@ -599,6 +618,13 @@ void switch_cluster_on_write_attr(zigbee_switch_cluster *cluster,
         switch_cluster_store_dimming_to_nv(cluster);
         return;
     }
+    if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_RESET_WINDOW) {
+        if (cluster->dimming_reset_window_ms > DIMMING_RESET_WINDOW_MAX_MS) {
+            cluster->dimming_reset_window_ms = DIMMING_RESET_WINDOW_MAX_MS;
+        }
+        switch_cluster_store_dimming_window_to_nv(cluster);
+        return;
+    }
     if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_RELAY_INDEX) {
         if (relay_clusters_cnt == 0) {
             cluster->relay_index = 0;
@@ -673,6 +699,7 @@ static void switch_cluster_store_dimming_to_nv(zigbee_switch_cluster *cluster) {
 }
 
 static void switch_cluster_load_dimming_from_nv(zigbee_switch_cluster *cluster) {
+    switch_cluster_load_dimming_window_from_nv(cluster);
     cluster->dimming_threshold_pct = DIMMING_THRESHOLD_DEFAULT_PCT;
 
     hal_nvm_status_t st = hal_nvm_read(
@@ -688,4 +715,34 @@ static void switch_cluster_load_dimming_from_nv(zigbee_switch_cluster *cluster) 
         return;
     }
     cluster->dimming_threshold_pct = dimming_nv_buffer.threshold_pct;
+}
+
+static zigbee_switch_dimming_window_config dimming_window_nv_buffer;
+
+static void switch_cluster_store_dimming_window_to_nv(
+    zigbee_switch_cluster *cluster) {
+    dimming_window_nv_buffer.reset_window_ms = cluster->dimming_reset_window_ms;
+    hal_nvm_write(NV_ITEM_SWITCH_DIMMING_WINDOW(cluster->switch_idx),
+                  sizeof(zigbee_switch_dimming_window_config),
+                  (uint8_t *)&dimming_window_nv_buffer);
+}
+
+static void switch_cluster_load_dimming_window_from_nv(
+    zigbee_switch_cluster *cluster) {
+    cluster->dimming_reset_window_ms = DIMMING_RESET_WINDOW_DEFAULT_MS;
+
+    hal_nvm_status_t st = hal_nvm_read(
+        NV_ITEM_SWITCH_DIMMING_WINDOW(cluster->switch_idx),
+        sizeof(zigbee_switch_dimming_window_config),
+        (uint8_t *)&dimming_window_nv_buffer);
+
+    if (st != HAL_NVM_SUCCESS) {
+        return; // Not stored yet: default
+    }
+    if (dimming_window_nv_buffer.reset_window_ms > DIMMING_RESET_WINDOW_MAX_MS) {
+        printf("Invalid dimming reset window %d in NV, using default\r\n",
+               dimming_window_nv_buffer.reset_window_ms);
+        return;
+    }
+    cluster->dimming_reset_window_ms = dimming_window_nv_buffer.reset_window_ms;
 }

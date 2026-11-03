@@ -77,14 +77,16 @@
 
 // Custom (fork): percent threshold for smart long-press dimming direction.
 // Kept far from upstream's sequential 0xff0X ids to avoid future clashes.
-#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD    0xff80
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD       0xff80
+// Custom (fork): re-press within this many ms after a dim keeps its direction
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_RESET_WINDOW    0xff81
 
 // Level control cluster attributes
-#define ZCL_ATTR_LEVEL_CURRENT_LEVEL                             0x0000
+#define ZCL_ATTR_LEVEL_CURRENT_LEVEL                                0x0000
 
 // Global (profile-wide) commands
-#define ZCL_CMD_READ_ATTRIBUTES                                  0x00
-#define ZCL_STATUS_SUCCESS                                       0x00
+#define ZCL_CMD_READ_ATTRIBUTES                                     0x00
+#define ZCL_STATUS_SUCCESS                                          0x00
 
 
 // Multistate cluster

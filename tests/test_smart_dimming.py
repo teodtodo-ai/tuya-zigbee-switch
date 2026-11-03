@@ -5,7 +5,8 @@ On long press it picks the direction from that answer:
   - lamp off           -> MoveToLevelWithOnOff(min) then Move up
   - lamp on, <= X%     -> up
   - lamp on, >  X%     -> down
-  - re-grab within 3 s -> same direction as the previous long press
+  - re-press within the reset window (default 1500 ms, 0 = off)
+                       -> same direction as the previous long press
   - at a limit         -> never push against it
   - no/invalid answer  -> legacy behaviour (alternate direction)
 """
@@ -28,6 +29,7 @@ from tests.zcl_consts import (
 )
 
 ZCL_ATTR_DIMMING_THRESHOLD = 0xFF80
+ZCL_ATTR_DIMMING_RESET_WINDOW = 0xFF81
 ZCL_CMD_READ_ATTRIBUTES = 0x00
 ZCL_ATTR_ONOFF = 0x0000
 ZCL_ATTR_CURRENT_LEVEL = 0x0000
@@ -376,3 +378,89 @@ def test_threshold_survives_restart(
     with StubProc(device_config=device_config) as proc:
         dev = Device(proc)
         assert get_threshold(dev, ep) == 25
+
+
+# --- Reset window ---------------------------------------------------------------
+
+
+def set_window(dev: Device, ep: int, ms: int) -> None:
+    dev.write_zigbee_attr(
+        ep, ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG, ZCL_ATTR_DIMMING_RESET_WINDOW, ms
+    )
+
+
+def get_window(dev: Device, ep: int) -> int:
+    return int(
+        dev.read_zigbee_attr(
+            ep, ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG, ZCL_ATTR_DIMMING_RESET_WINDOW
+        )
+    )
+
+
+def test_default_reset_window_is_1500_ms(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    assert get_window(momentary_device, relay_button_pair.switch_endpoint) == 1500
+
+
+@pytest.mark.parametrize(
+    "pause_ms,expected",
+    [
+        (1_300, ZCL_LEVEL_MOVE_DOWN),  # re-pressed inside 1500 ms: keep going
+        (1_700, ZCL_LEVEL_MOVE_UP),  # outside: threshold decides (39 % -> up)
+    ],
+)
+def test_reset_window_is_measured_to_the_next_press(
+    momentary_device: Device,
+    relay_button_pair: RelayButtonPair,
+    pause_ms: int,
+    expected: int,
+):
+    # Window counts from release to the next *press*, not to the long-press
+    # start 800 ms later
+    long_press(momentary_device, relay_button_pair, on=True, level=200)
+    momentary_device.step_time(pause_ms - 60)  # press_button adds 60 ms
+    direction = long_press(momentary_device, relay_button_pair, on=True, level=100)
+    assert direction == expected
+
+
+def test_reset_window_zero_disables_continue(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    set_window(momentary_device, relay_button_pair.switch_endpoint, 0)
+    long_press(momentary_device, relay_button_pair, on=True, level=200)
+    momentary_device.step_time(100)
+    direction = long_press(momentary_device, relay_button_pair, on=True, level=100)
+    assert direction == ZCL_LEVEL_MOVE_UP  # threshold decides immediately
+
+
+def test_reset_window_configured_longer(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    set_window(momentary_device, relay_button_pair.switch_endpoint, 4000)
+    long_press(momentary_device, relay_button_pair, on=True, level=200)
+    momentary_device.step_time(3_000)
+    direction = long_press(momentary_device, relay_button_pair, on=True, level=100)
+    assert direction == ZCL_LEVEL_MOVE_DOWN
+
+
+def test_reset_window_above_5000_is_clamped(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    set_window(momentary_device, relay_button_pair.switch_endpoint, 9000)
+    assert get_window(momentary_device, relay_button_pair.switch_endpoint) == 5000
+
+
+def test_reset_window_and_threshold_survive_restart(
+    device_config: str, relay_button_pair: RelayButtonPair
+):
+    ep = relay_button_pair.switch_endpoint
+    with StubProc(device_config=device_config) as proc:
+        dev = Device(proc)
+        set_threshold(dev, ep, 40)
+        set_window(dev, ep, 2500)
+
+    with StubProc(device_config=device_config) as proc:
+        dev = Device(proc)
+        assert get_threshold(dev, ep) == 40
+        assert get_window(dev, ep) == 2500

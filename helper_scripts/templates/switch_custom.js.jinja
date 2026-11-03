@@ -120,6 +120,20 @@ const romasku = {
             valueMax: 100,
             entityCategory: "config",
         }),
+    dimmingResetWindow: (name, endpointName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: 0xff81, type: 0x21 }, // uint16, custom firmware only
+            description:
+                "Pressing again within this time after a long-press dim keeps the same direction; " +
+                "after it the dimming threshold decides again. 0 = always use the threshold (custom firmware only)",
+            unit: "ms",
+            valueMin: 0,
+            valueMax: 5000,
+            entityCategory: "config",
+        }),
     pressAction: (name, endpointName) =>
         enumLookup({
             name,
@@ -486,6 +500,7 @@ const definitions = [
             romasku.longPressDuration("{{switchName}}_long_press_duration", "{{switchName}}"),
             romasku.levelMoveRate("{{switchName}}_level_move_rate", "{{switchName}}"),
             romasku.dimmingThreshold("{{switchName}}_dimming_threshold", "{{switchName}}"),
+            romasku.dimmingResetWindow("{{switchName}}_dimming_reset_window", "{{switchName}}"),
             {% endfor %}
             {% for relayName in device.relayIndicatorNames %}
             romasku.relayIndicatorMode("{{relayName}}_indicator_mode", "{{relayName}}"),
