@@ -29,8 +29,11 @@ class StubProc:
         joined: bool = True,
         freeze_time: bool = True,
         device_config: str | None = None,
+        low_at_boot: list[int] | None = None,
     ) -> None:
         self.cmd = [*cmd]
+        for pin in low_at_boot or []:
+            self.cmd += ["--low-at-boot", str(pin)]
         if device_config:
             self.cmd += ["--device-config", device_config]
         if not joined:

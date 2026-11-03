@@ -8,6 +8,9 @@
 // GPIO stub functions
 void stub_gpio_enable_debug(int enable);
 void stub_gpio_simulate_input(hal_gpio_pin_t gpio_pin, uint8_t value);
+
+// Input pin is driven low already at boot (button held during power-on)
+void stub_gpio_set_low_at_boot(hal_gpio_pin_t gpio_pin);
 uint8_t stub_gpio_get_output(hal_gpio_pin_t gpio_pin);
 
 // Tasks stub functions

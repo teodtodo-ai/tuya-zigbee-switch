@@ -18,6 +18,13 @@ typedef struct {
 } stub_gpio_pin_t;
 
 static stub_gpio_pin_t gpio_pins[MAX_GPIO_PINS];
+static uint8_t         low_at_boot[MAX_GPIO_PINS];
+
+void stub_gpio_set_low_at_boot(hal_gpio_pin_t gpio_pin) {
+    if (gpio_pin < MAX_GPIO_PINS) {
+        low_at_boot[gpio_pin] = 1;
+    }
+}
 
 void ensure_valid_input_pin(hal_gpio_pin_t gpio_pin);
 void ensure_valid_output_pin(hal_gpio_pin_t gpio_pin);
@@ -27,10 +34,13 @@ void hal_gpio_init(hal_gpio_pin_t gpio_pin, uint8_t is_input,
     if (gpio_pin >= MAX_GPIO_PINS)
         return;
 
-    gpio_pins[gpio_pin].initialized  = 1;
-    gpio_pins[gpio_pin].is_input     = is_input;
-    gpio_pins[gpio_pin].pull         = pull;
-    gpio_pins[gpio_pin].value        = (pull == HAL_GPIO_PULL_UP) ? 1 : 0;
+    gpio_pins[gpio_pin].initialized = 1;
+    gpio_pins[gpio_pin].is_input    = is_input;
+    gpio_pins[gpio_pin].pull        = pull;
+    gpio_pins[gpio_pin].value       = (pull == HAL_GPIO_PULL_UP) ? 1 : 0;
+    if (is_input && low_at_boot[gpio_pin]) {
+        gpio_pins[gpio_pin].value = 0;
+    }
     gpio_pins[gpio_pin].callback     = NULL;
     gpio_pins[gpio_pin].callback_arg = NULL;
 

@@ -542,6 +542,13 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         return;
     }
 
+    // Release without a seen press: the button was already held at boot
+    // (btn_init marks it pressed without calling on_press). Ignore it,
+    // otherwise it is sent as a phantom short press.
+    if (cluster->multistate_state == MULTISTATE_NOT_PRESSED) {
+        return;
+    }
+
     if (cluster->multistate_state != MULTISTATE_LONG_PRESS) {
         if (cluster->relay_mode == ZCL_ONOFF_CONFIGURATION_RELAY_MODE_SHORT) {
             switch_cluster_relay_action_on(cluster);

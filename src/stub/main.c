@@ -1,6 +1,7 @@
 #include <getopt.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #ifndef HAL_STUB
@@ -35,6 +36,7 @@ int main(int argc, char **argv) {
         { "device-config", required_argument, 0, 'd' },
         { "not-joined",    no_argument,       0, 'j' },
         { "freeze-time",   no_argument,       0, 'f' },
+        { "low-at-boot",   required_argument, 0, 'l' },
         { "help",          no_argument,       0, 'h' },
         {               0,                 0, 0,   0 }
     };
@@ -43,7 +45,7 @@ int main(int argc, char **argv) {
     device_conf_buf[0] = '\0';
     bool joined = true;
     for (;;) {
-        int opt = getopt_long(argc, argv, "d:j:f:h", long_opts, NULL);
+        int opt = getopt_long(argc, argv, "d:j:f:l:h", long_opts, NULL);
         if (opt == -1)
             break;
         switch (opt) {
@@ -55,6 +57,9 @@ int main(int argc, char **argv) {
             break;
         case 'f':
             stub_millis_freeze();
+            break;
+        case 'l':
+            stub_gpio_set_low_at_boot((hal_gpio_pin_t)atoi(optarg));
             break;
         case 'h':
         default:
