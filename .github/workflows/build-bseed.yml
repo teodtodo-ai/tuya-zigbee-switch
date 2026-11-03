@@ -1,0 +1,63 @@
+name: Build BSEED test firmware
+
+# Fork-only workflow: builds just the two BSEED boards in use and uploads the
+# OTA files as an artifact. Nothing is committed or pushed back.
+
+on:
+  push:
+    branches:
+      - smart-dimming
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # board.mk derives the OTA version from origin/main..HEAD
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make python3 python3-venv yq unzip wget
+
+      - name: Cache Telink Tools
+        uses: actions/cache@v4
+        with:
+          path: telink_tools
+          key: telink-tools-v3.7.2.0
+
+      - name: Install Telink SDK, toolchain and Python env
+        run: |
+          make telink/tools/all
+          make setup_venv
+
+      - name: Build L-only 1-gang (end device)
+        run: |
+          source .venv/bin/activate
+          BOARD=SWITCH_BSEED_TS0726_L_1GANG DEVICE_TYPE=end_device make board/build
+          ls -l bin/end_device/SWITCH_BSEED_TS0726_L_1GANG_END_DEVICE/
+
+      - name: Build L+N 1-gang (router)
+        run: |
+          source .venv/bin/activate
+          BOARD=SWITCH_BSEED_TS0726_1GANG DEVICE_TYPE=router make board/build
+          ls -l bin/router/SWITCH_BSEED_TS0726_1GANG/
+
+      - name: Show version info
+        run: |
+          echo "HEAD: $(git rev-parse --short HEAD)"
+          echo "Commits ahead of origin/main: $(git rev-list --count origin/main..HEAD)"
+          sha256sum bin/end_device/SWITCH_BSEED_TS0726_L_1GANG_END_DEVICE/* bin/router/SWITCH_BSEED_TS0726_1GANG/*
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: bseed-smart-dimming-${{ github.sha }}
+          path: |
+            bin/end_device/SWITCH_BSEED_TS0726_L_1GANG_END_DEVICE/
+            bin/router/SWITCH_BSEED_TS0726_1GANG/
+          if-no-files-found: error
