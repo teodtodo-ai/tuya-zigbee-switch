@@ -1,13 +1,18 @@
 name: Build BSEED test firmware
 
-# Fork-only workflow: builds just the two BSEED boards in use and uploads the
-# OTA files as an artifact. Nothing is committed or pushed back.
+# Fork-only workflow: builds just the two BSEED boards in use, uploads the OTA
+# files as an artifact and publishes them to the separate branch
+# "smart-dimming-ota" (one folder per source commit) so Zigbee2MQTT can fetch
+# them via raw.githubusercontent.com. No other branch is written.
 
 on:
   push:
     branches:
       - smart-dimming
   workflow_dispatch:
+
+permissions:
+  contents: write # only used to push to the smart-dimming-ota branch
 
 jobs:
   build:
@@ -61,3 +66,29 @@ jobs:
             bin/end_device/SWITCH_BSEED_TS0726_L_1GANG_END_DEVICE/
             bin/router/SWITCH_BSEED_TS0726_1GANG/
           if-no-files-found: error
+
+      - name: Publish OTA files to smart-dimming-ota branch
+        run: |
+          set -e
+          SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin smart-dimming-ota >/dev/null; then
+            git fetch origin smart-dimming-ota
+            git worktree add ota_publish origin/smart-dimming-ota
+            cd ota_publish
+            git checkout -B smart-dimming-ota
+          else
+            git worktree add --detach ota_publish
+            cd ota_publish
+            git checkout --orphan smart-dimming-ota
+            git rm -rqf .
+          fi
+          mkdir -p "$SHA/l_only_end_device" "$SHA/l_n_router"
+          cp ../bin/end_device/SWITCH_BSEED_TS0726_L_1GANG_END_DEVICE/* "$SHA/l_only_end_device/"
+          cp ../bin/router/SWITCH_BSEED_TS0726_1GANG/* "$SHA/l_n_router/"
+          (cd "$SHA" && sha256sum */* > SHA256SUMS && echo "source commit: $FULL_SHA" > BUILD_INFO.txt)
+          git add "$SHA"
+          git commit -m "OTA files for smart-dimming $SHA"
+          git push origin smart-dimming-ota
