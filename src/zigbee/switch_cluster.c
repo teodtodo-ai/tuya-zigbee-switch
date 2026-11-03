@@ -27,6 +27,9 @@ extern uint8_t relay_clusters_cnt;
 extern zigbee_switch_cluster switch_clusters[];
 extern uint8_t switch_clusters_cnt;
 
+// Upper limit for a long press loaded from NV (same as the Z2M converter)
+#define LONG_PRESS_MAX_MS                  5000
+
 // Smart long-press dimming (fork)
 #define DIMMING_THRESHOLD_DEFAULT_PCT      60
 #define DIMMING_THRESHOLD_MAX_PCT          100
@@ -675,14 +678,61 @@ void switch_cluster_load_attrs_from_nv(zigbee_switch_cluster *cluster) {
         printf("No switch config in NV, using defaults\r\n");
         return;
     }
-    cluster->action      = nv_config_buffer.action;
-    cluster->mode        = nv_config_buffer.mode;
+    // Each field is taken only if it is in range; otherwise the default set
+    // by the config parser stays. The NV item itself is never rewritten here.
+    if (nv_config_buffer.action <=
+        ZCL_ONOFF_CONFIGURATION_SWITCH_ACTION_TOGGLE_SMART_OPPOSITE) {
+        cluster->action = nv_config_buffer.action;
+    } else {
+        printf("Invalid action %d in NV, keeping default\r\n",
+               nv_config_buffer.action);
+    }
+    if (nv_config_buffer.mode <=
+        ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_MOMENTARY_NC) {
+        cluster->mode = nv_config_buffer.mode;
+    } else {
+        printf("Invalid mode %d in NV, keeping default\r\n",
+               nv_config_buffer.mode);
+    }
     cluster->relay_index = nv_config_buffer.relay_index;
-    cluster->relay_mode  = nv_config_buffer.relay_mode;
-    cluster->button->long_press_duration_ms =
-        nv_config_buffer.button_long_press_duration;
-    cluster->level_move_rate = nv_config_buffer.level_move_rate;
-    cluster->binded_mode     = nv_config_buffer.binded_mode;
+    if (nv_config_buffer.relay_mode <= ZCL_ONOFF_CONFIGURATION_RELAY_MODE_SHORT) {
+        cluster->relay_mode = nv_config_buffer.relay_mode;
+    } else {
+        printf("Invalid relay_mode %d in NV, keeping default\r\n",
+               nv_config_buffer.relay_mode);
+    }
+    if (nv_config_buffer.button_long_press_duration <=
+        LONG_PRESS_MAX_MS) {
+        cluster->button->long_press_duration_ms =
+            nv_config_buffer.button_long_press_duration;
+    } else {
+        printf("Invalid long press %d in NV, keeping default\r\n",
+               nv_config_buffer.button_long_press_duration);
+    }
+    if (nv_config_buffer.level_move_rate >= 1) {
+        cluster->level_move_rate = nv_config_buffer.level_move_rate;
+    } else {
+        printf("Invalid level move rate 0 in NV, keeping default\r\n");
+    }
+    if (nv_config_buffer.binded_mode >= ZCL_ONOFF_CONFIGURATION_BINDED_MODE_RISE &&
+        nv_config_buffer.binded_mode <= ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT) {
+        cluster->binded_mode = nv_config_buffer.binded_mode;
+    } else {
+        printf("Invalid binded_mode %d in NV, keeping default\r\n",
+               nv_config_buffer.binded_mode);
+    }
+
+    // Normally-closed buttons are inverted. The polarity was set only when the
+    // mode was written from Z2M, so it was lost after a restart. btn_init()
+    // has already run with the old polarity, so its state is re-derived
+    // the same way btn_init() does it (a held button is not a press).
+    if (cluster->mode == ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_MOMENTARY_NC &&
+        !cluster->button->pressed_when_high) {
+        cluster->button->pressed_when_high = 1;
+        uint8_t held = cluster->button->debounce_last_state == 1;
+        cluster->button->pressed      = held;
+        cluster->button->long_pressed = held;
+    }
 
     // Validate relay_index to prevent out-of-bounds access
     if (relay_clusters_cnt == 0) {
