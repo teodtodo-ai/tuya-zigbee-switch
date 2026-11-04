@@ -2,7 +2,7 @@
 
 On every press the switch reads OnOff + CurrentLevel from the bound lamp.
 On long press it picks the direction from that answer:
-  - lamp off           -> MoveToLevelWithOnOff(min) then Move up
+  - lamp off           -> MoveToLevelWithOnOff(min + 1), Move up 250 ms later
   - lamp on, <= X%     -> up
   - lamp on, >  X%     -> down
   - re-press within the reset window (default 1500 ms, 0 = off)
@@ -64,6 +64,9 @@ def lamp_answers(
         assert res.ok, res.payload
 
 
+DIM_UP_DELAY_MS = 250
+
+
 def set_threshold(dev: Device, ep: int, pct: int) -> None:
     dev.write_zigbee_attr(
         ep, ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG, ZCL_ATTR_DIMMING_THRESHOLD, pct
@@ -91,8 +94,9 @@ def long_press(
     dev.clear_events()
     dev.press_button(pair.button_pin)
     lamp_answers(dev, pair.switch_endpoint, on, level)
-    # Just past the 800 ms long-press threshold, like a real hold
+    # Past the 800 ms long-press threshold plus the delayed Move up (lamp off)
     dev.step_time(900)
+    dev.step_time(DIM_UP_DELAY_MS + 10)
     move = dev.wait_for_cmd_send(
         pair.switch_endpoint, ZCL_CLUSTER_LEVEL_CONTROL, ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF
     )
@@ -165,7 +169,9 @@ def test_lamp_off_starts_from_minimum_and_goes_up(
 
     mtl = move_to_level_cmds(momentary_device, ep)
     assert len(mtl) == 1
-    assert mtl[0].data == bytes([1, 0, 0])  # level 1, instant
+    # Level 2, instant: a "with On/Off" command ending at level 1 (minimum)
+    # would switch the lamp off again
+    assert mtl[0].data == bytes([2, 0, 0])
 
     # MoveToLevel must go out before the Move
     level_cmds = [
@@ -174,6 +180,53 @@ def test_lamp_off_starts_from_minimum_and_goes_up(
     assert level_cmds.index(ZCL_CMD_LEVEL_MOVE_TO_LEVEL_WITH_ON_OFF) < level_cmds.index(
         ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF
     )
+
+
+
+def test_lamp_off_move_up_is_delayed(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    dev, ep = momentary_device, relay_button_pair.switch_endpoint
+    dev.clear_events()
+    dev.press_button(relay_button_pair.button_pin)
+    lamp_answers(dev, ep, False, 254)
+    dev.step_time(900)  # long press started, MoveToLevel sent
+    assert len(move_to_level_cmds(dev, ep)) == 1
+    moves = [
+        c for c in dev.zcl_list_cmds(ep, ZCL_CLUSTER_LEVEL_CONTROL)
+        if c.cmd == ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF
+    ]
+    assert moves == []  # Move up not yet
+    dev.step_time(DIM_UP_DELAY_MS)
+    move = dev.wait_for_cmd_send(
+        ep, ZCL_CLUSTER_LEVEL_CONTROL, ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF
+    )
+    assert move.data[0] == ZCL_LEVEL_MOVE_UP
+    dev.release_button(relay_button_pair.button_pin)
+
+
+def test_lamp_off_released_before_delay_sends_no_move(
+    momentary_device: Device, relay_button_pair: RelayButtonPair
+):
+    dev, ep = momentary_device, relay_button_pair.switch_endpoint
+    dev.clear_events()
+    dev.press_button(relay_button_pair.button_pin)
+    lamp_answers(dev, ep, False, 254)
+    dev.step_time(800)  # long press just started
+    dev.release_button(relay_button_pair.button_pin)  # 60 ms later
+    dev.wait_for_cmd_send(
+        ep, ZCL_CLUSTER_LEVEL_CONTROL, ZCL_CMD_LEVEL_STOP_WITH_ON_OFF
+    )
+    dev.step_time(1_000)
+    sync(dev)
+    moves = [
+        c for c in dev.zcl_list_cmds(ep, ZCL_CLUSTER_LEVEL_CONTROL)
+        if c.cmd == ZCL_CMD_LEVEL_MOVE_WITH_ON_OFF
+    ]
+    assert moves == []
+    # Next hold right after: lamp is on at a low level, continue up
+    dev.step_time(200)
+    assert long_press(dev, relay_button_pair, on=True, level=2) == ZCL_LEVEL_MOVE_UP
 
 
 def test_lamp_on_above_threshold_goes_down(

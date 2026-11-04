@@ -3,6 +3,7 @@
 
 #include "base_components/button.h"
 #include "base_components/led.h"
+#include "hal/tasks.h"
 #include "hal/zigbee.h"
 #include <stdint.h>
 
@@ -43,6 +44,7 @@ typedef struct {
     uint8_t              last_dim_valid;
     uint8_t              last_dim_direction;
     uint32_t             last_dim_end_ms;
+    hal_task_t           dim_up_task;             // delayed Move up from off
 } zigbee_switch_cluster;
 
 void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,

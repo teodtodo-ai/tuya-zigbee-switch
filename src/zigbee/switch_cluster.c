@@ -39,6 +39,11 @@ extern uint8_t switch_clusters_cnt;
 #define DIMMING_RESET_WINDOW_MAX_MS        5000
 #define LAMP_LEVEL_MIN                     1
 #define LAMP_LEVEL_MAX                     254
+// Lamp off -> on at this level. One above the minimum: a "with On/Off"
+// command that ends at the minimum level switches the lamp off (ZCL).
+#define LAMP_LEVEL_FROM_OFF                (LAMP_LEVEL_MIN + 1)
+// Move up is sent this long after MoveToLevel, so it reaches the lamp second
+#define DIM_UP_DELAY_MS                    250
 #define LAMP_STATE_ONOFF_VALID             0x01
 #define LAMP_STATE_LEVEL_VALID             0x02
 
@@ -60,6 +65,7 @@ static void switch_cluster_load_dimming_window_from_nv(
 void switch_cluster_on_button_press(zigbee_switch_cluster *cluster);
 void switch_cluster_on_button_release(zigbee_switch_cluster *cluster);
 void switch_cluster_on_button_long_press(zigbee_switch_cluster *cluster);
+static void switch_cluster_dim_up_task_handler(void *arg);
 static bool switch_cluster_has_valid_relay(
     const zigbee_switch_cluster *cluster);
 
@@ -131,6 +137,10 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     cluster->button->on_long_press =
         (ev_button_callback_t)switch_cluster_on_button_long_press;
     cluster->button->callback_param = cluster;
+
+    cluster->dim_up_task.handler = switch_cluster_dim_up_task_handler;
+    cluster->dim_up_task.arg     = cluster;
+    hal_tasks_init(&cluster->dim_up_task);
 
     SETUP_ATTR(0, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_TYPE, ZCL_DATA_TYPE_ENUM8,
                ATTR_READONLY, cluster->mode);
@@ -433,6 +443,17 @@ static void switch_cluster_send_level_move(zigbee_switch_cluster *cluster,
         direction == ZCL_LEVEL_MOVE_DOWN ? ZCL_LEVEL_MOVE_UP : ZCL_LEVEL_MOVE_DOWN;
 }
 
+static void switch_cluster_dim_up_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    // Released before the delay ran out: Stop is already sent, stay low
+    if (!cluster->button->pressed ||
+        cluster->multistate_state != MULTISTATE_LONG_PRESS) {
+        return;
+    }
+    switch_cluster_send_level_move(cluster, ZCL_LEVEL_MOVE_UP);
+}
+
 void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
     if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
         return;
@@ -447,11 +468,15 @@ void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
     }
 
     if (!cluster->lamp_on) {
-        // Lamp is off: switch it on at minimum, then fade up
-        hal_zigbee_cmd c =
-            build_level_move_to_level_onoff_cmd(cluster->endpoint, LAMP_LEVEL_MIN);
+        // Lamp is off: switch it on just above minimum, then fade up. The
+        // Move is delayed so it cannot overtake MoveToLevel on the way to
+        // the lamp; if it is lost, the lamp stays on at the low level.
+        hal_zigbee_cmd c = build_level_move_to_level_onoff_cmd(
+            cluster->endpoint, LAMP_LEVEL_FROM_OFF);
         hal_zigbee_send_cmd_to_bindings(&c);
-        switch_cluster_send_level_move(cluster, ZCL_LEVEL_MOVE_UP);
+        cluster->last_dim_direction   = ZCL_LEVEL_MOVE_UP;
+        cluster->level_move_direction = ZCL_LEVEL_MOVE_DOWN;
+        hal_tasks_schedule(&cluster->dim_up_task, DIM_UP_DELAY_MS);
         return;
     }
 
@@ -561,6 +586,7 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         }
     } else {
         // This is end of long press, send zcl_level stop
+        hal_tasks_unschedule(&cluster->dim_up_task);
         switch_cluster_level_stop(cluster);
         cluster->last_dim_valid  = 1;
         cluster->last_dim_end_ms = hal_millis();
