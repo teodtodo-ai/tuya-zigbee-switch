@@ -41,7 +41,7 @@ typedef struct {
     uint8_t                          relay_index;
     uint8_t                          binded_mode;
     button_t *                       button;
-    hal_zigbee_attribute             attr_infos[18];
+    hal_zigbee_attribute             attr_infos[20];
     uint16_t                         multistate_state;
     hal_zigbee_attribute             multistate_attr_infos[4];
     uint8_t                          level_move_rate;
@@ -87,17 +87,22 @@ typedef struct {
     hal_task_t                       very_long_task;        // 15 s hold
 
     // Layer 2: actions
-    uint8_t                          op_mode;            // SWITCH_OP_MODE_*
-    uint8_t                          onoff_flag;         // persisted, 0/1
-    uint8_t                          scene_count[2];     // persisted, 0..10
-    uint16_t                         scene_group_id[2];  // persisted
-    uint8_t                          scene_lockout_s[2]; // persisted, 5..15
-    uint8_t                          last_scene[2];      // persisted, scene id
+    uint8_t                          op_mode;                // SWITCH_OP_MODE_*
+    uint8_t                          onoff_flag;             // persisted, 0/1
+    uint8_t                          scene_count[2];         // persisted, 0..10
+    uint16_t                         scene_group_id[2];      // persisted
+    uint8_t                          scene_lockout_s[2];     // persisted, 5..15
+    uint8_t                          last_scene[2];          // persisted, scene id
     uint8_t                          current_scene[2];
-    uint8_t                          reset_wait_release; // armed, button still held
+    uint8_t                          reset_wait_release;     // armed, button still held
     uint32_t                         reset_release_ms;
-    hal_task_t                       mode_task;          // lockout / reset window
-    hal_task_t                       led_task;           // scene LED pattern
+    hal_task_t                       mode_task;              // lockout / reset window
+    hal_task_t                       led_task;               // scene LED pattern
+    uint8_t                          sos_step;               // SOS LED step, 0 = idle
+    // Light on Quadruple (persisted)
+    uint8_t                          quadruple_level_pct;    // 0..100
+    uint16_t                         quadruple_color_temp_k; // 2000..7000
+    hal_task_t                       quadruple_color_task;   // colour after level
     ev_button_multi_press_callback_t orig_on_multi_press;
 } zigbee_switch_cluster;
 

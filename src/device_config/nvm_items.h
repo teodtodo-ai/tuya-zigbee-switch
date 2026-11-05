@@ -30,21 +30,23 @@
 
 // Custom (fork) items, kept well away from upstream's range so an upstream
 // update can never reuse them. One item per switch.
-#define NV_ITEM_SWITCH_DIMMING_CONFIG(switch_idx)         (0x40 + (switch_idx))
+#define NV_ITEM_SWITCH_DIMMING_CONFIG(switch_idx)          (0x40 + (switch_idx))
 // Separate item so adding it did not change the size of the item above
-#define NV_ITEM_SWITCH_DIMMING_WINDOW(switch_idx)         (0x48 + (switch_idx))
+#define NV_ITEM_SWITCH_DIMMING_WINDOW(switch_idx)          (0x48 + (switch_idx))
 // Multi-press gestures and scenes: one item per setting and switch, so no
 // item ever changes size (see bug #11)
-#define NV_ITEM_SWITCH_DIMMING_SYNC(switch_idx)           (0x50 + (switch_idx))
-#define NV_ITEM_SWITCH_MULTI_PRESS_WINDOW(switch_idx)     (0x58 + (switch_idx))
-#define NV_ITEM_SWITCH_ONOFF_FLAG(switch_idx)             (0x60 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_COUNT_SET1(switch_idx)       (0x68 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_GROUP_ID_SET1(switch_idx)    (0x70 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_LOCKOUT_SET1(switch_idx)     (0x78 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_COUNT_SET2(switch_idx)       (0x80 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_GROUP_ID_SET2(switch_idx)    (0x88 + (switch_idx))
-#define NV_ITEM_SWITCH_SCENE_LOCKOUT_SET2(switch_idx)     (0x90 + (switch_idx))
-#define NV_ITEM_SWITCH_LAST_SCENE_SET1(switch_idx)        (0x98 + (switch_idx))
-#define NV_ITEM_SWITCH_LAST_SCENE_SET2(switch_idx)        (0xA0 + (switch_idx))
+#define NV_ITEM_SWITCH_DIMMING_SYNC(switch_idx)            (0x50 + (switch_idx))
+#define NV_ITEM_SWITCH_MULTI_PRESS_WINDOW(switch_idx)      (0x58 + (switch_idx))
+#define NV_ITEM_SWITCH_ONOFF_FLAG(switch_idx)              (0x60 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_COUNT_SET1(switch_idx)        (0x68 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_GROUP_ID_SET1(switch_idx)     (0x70 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_LOCKOUT_SET1(switch_idx)      (0x78 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_COUNT_SET2(switch_idx)        (0x80 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_GROUP_ID_SET2(switch_idx)     (0x88 + (switch_idx))
+#define NV_ITEM_SWITCH_SCENE_LOCKOUT_SET2(switch_idx)      (0x90 + (switch_idx))
+#define NV_ITEM_SWITCH_LAST_SCENE_SET1(switch_idx)         (0x98 + (switch_idx))
+#define NV_ITEM_SWITCH_LAST_SCENE_SET2(switch_idx)         (0xA0 + (switch_idx))
+#define NV_ITEM_SWITCH_QUADRUPLE_LEVEL(switch_idx)         (0xA8 + (switch_idx))
+#define NV_ITEM_SWITCH_QUADRUPLE_COLOR_TEMP(switch_idx)    (0xB0 + (switch_idx))
 
 #endif /* DEVICE_CONFIG_NVM_ITEMS_H_ */

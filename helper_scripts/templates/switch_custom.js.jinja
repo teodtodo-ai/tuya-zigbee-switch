@@ -198,6 +198,32 @@ const romasku = {
             valueMax: 15,
             entityCategory: "config",
         }),
+    quadrupleLevel: (name, endpointName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: 0xff8a, type: 0x20 }, // uint8, custom firmware only
+            description:
+                "Quadruple click: brightness the lamps are set to; 0 = switch them off (custom firmware only)",
+            unit: "%",
+            valueMin: 0,
+            valueMax: 100,
+            entityCategory: "config",
+        }),
+    quadrupleColorTemp: (name, endpointName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: 0xff8b, type: 0x21 }, // uint16, custom firmware only
+            description:
+                "Quadruple click: colour temperature the lamps are set to; lamps clamp it to their own range (custom firmware only)",
+            unit: "K",
+            valueMin: 2000,
+            valueMax: 7000,
+            entityCategory: "config",
+        }),
     pressAction: (name, endpointName) =>
         enumLookup({
             name,
@@ -205,13 +231,13 @@ const romasku = {
             access: "STATE_GET",
             lookup: {
                 released: 0, press: 1, long_press: 2, position_on: 3, position_off: 4,
-                single_click: 5, double_click: 6, triple_click: 7,
+                single_click: 5, double_click: 6, triple_click: 7, quadruple_click: 8,
             },
             cluster: "genMultistateInput",
             attribute: "presentValue",
             description:
                 "Action of the switch: 'released', 'press', 'long_press'; with multi-press gestures also " +
-                "'single_click', 'double_click', 'triple_click'",
+                "'single_click', 'double_click', 'triple_click', 'quadruple_click'",
             entityCategory: "diagnostic",
         }),
     relayIndicatorMode: (name, endpointName) =>
@@ -578,6 +604,8 @@ const definitions = [
             romasku.sceneCount("{{switchName}}_scene_count_set2", "{{switchName}}", 0xff87, "set 2 (triple click, scenes 10-19)"),
             romasku.sceneGroupId("{{switchName}}_scene_group_id_set2", "{{switchName}}", 0xff88, "set 2"),
             romasku.sceneLockout("{{switchName}}_scene_lockout_set2", "{{switchName}}", 0xff89, "set 2"),
+            romasku.quadrupleLevel("{{switchName}}_quadruple_level", "{{switchName}}"),
+            romasku.quadrupleColorTemp("{{switchName}}_quadruple_color_temp", "{{switchName}}"),
             {% endfor %}
             {% for relayName in device.relayIndicatorNames %}
             romasku.relayIndicatorMode("{{relayName}}_indicator_mode", "{{relayName}}"),

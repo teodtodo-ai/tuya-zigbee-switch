@@ -14,6 +14,7 @@
 #define ZCL_CLUSTER_LEVEL_CONTROL             0x0008
 #define ZCL_CLUSTER_GROUPS                    0x0004
 #define ZCL_CLUSTER_SCENES                    0x0005
+#define ZCL_CLUSTER_COLOR_CONTROL             0x0300
 #define ZCL_CLUSTER_OTA_BOOTLOAD              0x0019
 #define ZCL_CLUSTER_WINDOW_COVERING           0x0102
 #define ZCL_CLUSTER_COVER_SWITCH_CONFIG       0xFC01
@@ -91,6 +92,8 @@
 #define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET2        0xff87
 #define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET2     0xff88
 #define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET2      0xff89
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_LEVEL         0xff8a
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_COLOR_TEMP    0xff8b
 
 // Level control cluster attributes
 #define ZCL_ATTR_LEVEL_CURRENT_LEVEL                                0x0000
@@ -223,6 +226,10 @@
 // Scenes Cluster
 
 #define ZCL_CMD_SCENES_RECALL_SCENE    0x05
+
+// Color Control Cluster
+
+#define ZCL_CMD_COLOR_MOVE_TO_COLOR_TEMPERATURE    0x0a
 
 // Level Cluster
 

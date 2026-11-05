@@ -50,6 +50,11 @@ ATTR_SCENE_LOCKOUT_SET1 = 0xFF86
 ATTR_SCENE_COUNT_SET2 = 0xFF87
 ATTR_SCENE_GROUP_ID_SET2 = 0xFF88
 ATTR_SCENE_LOCKOUT_SET2 = 0xFF89
+ATTR_QUADRUPLE_LEVEL = 0xFF8A
+ATTR_QUADRUPLE_COLOR_TEMP = 0xFF8B
+
+ZCL_CLUSTER_COLOR_CONTROL = 0x0300
+ZCL_CMD_MOVE_TO_COLOR_TEMPERATURE = 0x0A
 
 ZCL_ATTR_ONOFF = 0x0000
 ZCL_ATTR_CURRENT_LEVEL = 0x0000
@@ -61,6 +66,7 @@ MS_LONG_PRESS = 2
 MS_SINGLE = 5
 MS_DOUBLE = 6
 MS_TRIPLE = 7
+MS_QUADRUPLE = 8
 
 WINDOW_MS = 250
 CONFIRM_MS = WINDOW_MS + 10
@@ -260,14 +266,15 @@ def test_long_click_is_reported(gdev: Device, relay_button_pair):
     assert multistate_reports(gdev, pair) == [MS_LONG_PRESS, MS_RELEASED]
 
 
-def test_four_presses_are_ignored(gdev: Device, relay_button_pair):
+def test_five_presses_are_ignored(gdev: Device, relay_button_pair):
     pair = relay_button_pair
     set_attr(gdev, pair, ATTR_SCENE_COUNT_SET1, 3)
     set_attr(gdev, pair, ATTR_SCENE_COUNT_SET2, 3)
     gdev.clear_events()
-    clicks(gdev, pair, 4)
+    clicks(gdev, pair, 5)
     assert onoff_cmds(gdev, pair) == []
     assert recalls(gdev, pair) == []
+    assert level_cmds(gdev, pair) == []
     assert multistate_reports(gdev, pair) == []
 
 
@@ -656,3 +663,173 @@ def test_ten_quick_presses_do_not_reset(gdev: Device, relay_button_pair):
         clicks(gdev, pair, 3, confirm=False)
     sync(gdev)
     assert gdev.is_joined()
+
+
+# --- Light on Quadruple ---------------------------------------------------------
+
+
+def color_cmds(dev: Device, pair: RelayButtonPair) -> list:
+    sync(dev)
+    return dev.zcl_list_cmds(pair.switch_endpoint, ZCL_CLUSTER_COLOR_CONTROL)
+
+
+def test_quadruple_click_is_reported(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    clicks(gdev, pair, 4)
+    assert multistate_reports(gdev, pair) == [MS_QUADRUPLE, MS_RELEASED]
+
+
+def test_quadruple_sets_level_then_color(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    clicks(gdev, pair, 4)
+    mtl = [c for c in level_cmds(gdev, pair) if c.cmd == ZCL_CMD_LEVEL_MOVE_TO_LEVEL_WITH_ON_OFF]
+    assert len(mtl) == 1 and mtl[0].data == bytes([254, 0, 0])
+    assert color_cmds(gdev, pair) == []          # colour comes 250 ms later
+    gdev.step_time(260)
+    col = color_cmds(gdev, pair)
+    assert len(col) == 1 and col[0].cmd == ZCL_CMD_MOVE_TO_COLOR_TEMPERATURE
+    mireds = col[0].data[0] | (col[0].data[1] << 8)
+    assert mireds == 370                          # 2700 K
+    assert col[0].data[2:] == bytes([0, 0])       # transition 0
+
+
+def test_quadruple_uses_settings(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    assert get_attr(gdev, pair, ATTR_QUADRUPLE_LEVEL) == 100
+    assert get_attr(gdev, pair, ATTR_QUADRUPLE_COLOR_TEMP) == 2700
+    set_attr(gdev, pair, ATTR_QUADRUPLE_LEVEL, 50)
+    set_attr(gdev, pair, ATTR_QUADRUPLE_COLOR_TEMP, 5000)
+    gdev.clear_events()
+    clicks(gdev, pair, 4)
+    gdev.step_time(260)
+    mtl = [c for c in level_cmds(gdev, pair) if c.cmd == ZCL_CMD_LEVEL_MOVE_TO_LEVEL_WITH_ON_OFF]
+    assert mtl[0].data[0] == 127
+    col = color_cmds(gdev, pair)
+    assert (col[0].data[0] | (col[0].data[1] << 8)) == 200  # 5000 K
+
+
+@pytest.mark.parametrize("attr,value,expected", [
+    (ATTR_QUADRUPLE_LEVEL, 150, 100),
+    (ATTR_QUADRUPLE_COLOR_TEMP, 1500, 2000),
+    (ATTR_QUADRUPLE_COLOR_TEMP, 9000, 7000),
+])
+def test_quadruple_settings_are_clamped(gdev: Device, relay_button_pair, attr, value, expected):
+    set_attr(gdev, relay_button_pair, attr, value)
+    assert get_attr(gdev, relay_button_pair, attr) == expected
+
+
+def test_quadruple_level_zero_switches_off(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    set_attr(gdev, pair, ATTR_QUADRUPLE_LEVEL, 0)
+    gdev.clear_events()
+    clicks(gdev, pair, 1)                 # On, flag 1
+    clicks(gdev, pair, 4)
+    gdev.step_time(260)
+    mtl = [c for c in level_cmds(gdev, pair) if c.cmd == ZCL_CMD_LEVEL_MOVE_TO_LEVEL_WITH_ON_OFF]
+    assert mtl[0].data[0] == 0
+    assert color_cmds(gdev, pair) == []
+    gdev.clear_events()
+    clicks(gdev, pair, 1)                 # flag 0: next click switches on
+    assert onoff_cmds(gdev, pair) == [ZCL_CMD_ONOFF_ON]
+
+
+def test_quadruple_sets_flag_on(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    clicks(gdev, pair, 4)
+    gdev.clear_events()
+    clicks(gdev, pair, 1)
+    assert onoff_cmds(gdev, pair) == [ZCL_CMD_ONOFF_OFF]
+
+
+def test_quadruple_has_no_effect_in_scene_mode(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    set_attr(gdev, pair, ATTR_SCENE_COUNT_SET1, 3)
+    gdev.clear_events()
+    enter_scenes(gdev, pair, 2)
+    clicks(gdev, pair, 4)
+    gdev.step_time(260)
+    assert [c for c in level_cmds(gdev, pair)] == []
+    assert color_cmds(gdev, pair) == []
+    assert recalls(gdev, pair) == [(0, 0)]
+
+
+def test_quadruple_cancels_armed_reset(gdev: Device, relay_button_pair):
+    pair = relay_button_pair
+    very_long_hold(gdev, pair)
+    clicks(gdev, pair, 4)
+    gdev.step_time(3000)
+    clicks(gdev, pair, 1)
+    assert gdev.is_joined()
+
+
+# --- SOS when a scene set is off ------------------------------------------------
+
+
+SOS_DEVICE = "A;B;SA0u;RB0;IA1;"  # switch A0, relay B0, indicator LED A1
+SOS_ON_MS = [150, 150, 150, 450, 450, 450, 150, 150, 150]
+
+
+def _led_device():
+    from tests.client import StubProc
+
+    proc = StubProc(device_config=SOS_DEVICE).start()
+    dev = Device(proc)
+    dev.zcl_switch_mode_set(1, ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_MOMENTARY)
+    dev.zcl_switch_relay_mode_set(1, ZCL_ONOFF_CONFIGURATION_RELAY_MODE_DETACHED)
+    dev.zcl_switch_binding_mode_set(1, ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT)
+    dev.step_time(500)  # let the press flash and anything else settle
+    return proc, dev
+
+
+def _led_trace(dev: Device, total_ms: int, step_ms: int = 25) -> list[int]:
+    trace = []
+    for _ in range(total_ms // step_ms):
+        dev.step_time(step_ms)
+        trace.append(1 if dev.get_gpio("A1", refresh=True) else 0)
+    return trace
+
+
+def _runs(trace: list[int]) -> list[tuple[int, int]]:
+    runs = []
+    for v in trace:
+        if runs and runs[-1][0] == v:
+            runs[-1] = (v, runs[-1][1] + 1)
+        else:
+            runs.append((v, 1))
+    return runs
+
+
+def test_sos_when_scene_set_is_off():
+    pair = RelayButtonPair(relay_pin="B0", button_pin="A0", switch_endpoint=1, relay_endpoint=2)
+    proc, dev = _led_device()
+    try:
+        for _ in range(2):              # double click, set 1 has 0 scenes
+            press(dev, pair)
+            release(dev, pair)
+        dev.step_time(WINDOW_MS - 50)   # just before confirmation
+        trace = _led_trace(dev, 3600)
+        on_runs = [n * 25 for v, n in _runs(trace) if v == 1]
+        # the last on-runs are the SOS marks (a press flash may come first)
+        marks = on_runs[-9:]
+        assert len(marks) == 9, on_runs
+        for got, want in zip(marks, SOS_ON_MS):
+            assert abs(got - want) <= 50, (marks, SOS_ON_MS)
+        assert recalls(dev, pair) == []
+    finally:
+        proc.stop()
+
+
+def test_no_sos_when_scene_set_is_on():
+    pair = RelayButtonPair(relay_pin="B0", button_pin="A0", switch_endpoint=1, relay_endpoint=2)
+    proc, dev = _led_device()
+    try:
+        set_attr(dev, pair, ATTR_SCENE_COUNT_SET1, 2)
+        for _ in range(2):
+            press(dev, pair)
+            release(dev, pair)
+        dev.step_time(WINDOW_MS - 50)
+        trace = _led_trace(dev, 1400)
+        long_on = [n * 25 for v, n in _runs(trace) if v == 1 and n * 25 >= 400]
+        assert long_on == []            # scene pattern: short blinks only
+    finally:
+        proc.stop()

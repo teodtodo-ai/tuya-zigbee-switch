@@ -16,15 +16,16 @@ const uint8_t  multistate_out_of_service = 0;
 const uint8_t  multistate_flags          = 0;
 const uint16_t multistate_num_of_states  = 3;
 
-#define MULTISTATE_NOT_PRESSED     0
-#define MULTISTATE_PRESS           1
-#define MULTISTATE_LONG_PRESS      2
-#define MULTISTATE_POSITION_ON     3
-#define MULTISTATE_POSITION_OFF    4
+#define MULTISTATE_NOT_PRESSED        0
+#define MULTISTATE_PRESS              1
+#define MULTISTATE_LONG_PRESS         2
+#define MULTISTATE_POSITION_ON        3
+#define MULTISTATE_POSITION_OFF       4
 // Fork: confirmed multi-press gestures (Layer 1 reports)
-#define MULTISTATE_SINGLE_CLICK    5
-#define MULTISTATE_DOUBLE_CLICK    6
-#define MULTISTATE_TRIPLE_CLICK    7
+#define MULTISTATE_SINGLE_CLICK       5
+#define MULTISTATE_DOUBLE_CLICK       6
+#define MULTISTATE_TRIPLE_CLICK       7
+#define MULTISTATE_QUADRUPLE_CLICK    8
 
 extern zigbee_relay_cluster relay_clusters[];
 extern uint8_t relay_clusters_cnt;
@@ -59,23 +60,35 @@ extern uint8_t switch_clusters_cnt;
 
 // Multi-press gestures (fork). Active only for a momentary switch whose
 // relay is detached and whose binded mode is "short press".
-#define MULTI_PRESS_WINDOW_DEFAULT_MS    250
-#define MULTI_PRESS_WINDOW_MIN_MS        100
-#define MULTI_PRESS_WINDOW_MAX_MS        400
-#define VERY_LONG_HOLD_MS                15000
-#define RESET_CONFIRM_WINDOW_MS          3000
-#define SCENE_COUNT_MAX                  10
-#define SCENE_SET2_FIRST_ID              10
-#define SCENE_LOCKOUT_DEFAULT_S          10
-#define SCENE_LOCKOUT_MIN_S              5
-#define SCENE_LOCKOUT_MAX_S              15
+#define MULTI_PRESS_WINDOW_DEFAULT_MS     250
+#define MULTI_PRESS_WINDOW_MIN_MS         100
+#define MULTI_PRESS_WINDOW_MAX_MS         400
+#define VERY_LONG_HOLD_MS                 15000
+#define RESET_CONFIRM_WINDOW_MS           3000
+#define SCENE_COUNT_MAX                   10
+#define SCENE_SET2_FIRST_ID               10
+#define SCENE_LOCKOUT_DEFAULT_S           10
+#define SCENE_LOCKOUT_MIN_S               5
+#define SCENE_LOCKOUT_MAX_S               15
 // Scene mode LED: N short blinks, pause, repeated
-#define SCENE_LED_PERIOD_MS              1500
-#define SCENE_LED_ON_MS                  120
-#define SCENE_LED_OFF_MS                 180
+#define SCENE_LED_PERIOD_MS               1500
+#define SCENE_LED_ON_MS                   120
+#define SCENE_LED_OFF_MS                  180
+// "Scene set off" LED: SOS once (on times; 150 ms off between marks)
+#define SOS_SHORT_MS                      150
+#define SOS_LONG_MS                       450
+#define SOS_GAP_MS                        150
+#define SOS_MARKS                         9
+// Light on Quadruple
+#define QUADRUPLE_LEVEL_DEFAULT_PCT       100
+#define QUADRUPLE_COLOR_TEMP_DEFAULT_K    2700
+#define QUADRUPLE_COLOR_TEMP_MIN_K        2000
+#define QUADRUPLE_COLOR_TEMP_MAX_K        7000
+// Colour goes after the level: a lamp that is off may ignore it
+#define QUADRUPLE_COLOR_DELAY_MS          250
 // Reset armed LED: fast blinking
-#define RESET_LED_ON_MS                  80
-#define RESET_LED_OFF_MS                 80
+#define RESET_LED_ON_MS                   80
+#define RESET_LED_OFF_MS                  80
 
 typedef struct {
     uint8_t threshold_pct;
@@ -106,6 +119,9 @@ static void switch_cluster_gesture_task_handler(void *arg);
 static void switch_cluster_very_long_task_handler(void *arg);
 static void switch_cluster_mode_task_handler(void *arg);
 static void switch_cluster_led_task_handler(void *arg);
+static void switch_cluster_quadruple_color_task_handler(void *arg);
+static void switch_cluster_play_sos(zigbee_switch_cluster *cluster);
+static void switch_cluster_light_on_quadruple(zigbee_switch_cluster *cluster);
 static void switch_cluster_multi_press_trampoline(void *arg, uint8_t count);
 static void switch_cluster_leave_op_mode(zigbee_switch_cluster *cluster);
 static void switch_cluster_set_onoff_flag(zigbee_switch_cluster *cluster,
@@ -205,6 +221,10 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     cluster->led_task.handler = switch_cluster_led_task_handler;
     cluster->led_task.arg     = cluster;
     hal_tasks_init(&cluster->led_task);
+    cluster->quadruple_color_task.handler =
+        switch_cluster_quadruple_color_task_handler;
+    cluster->quadruple_color_task.arg = cluster;
+    hal_tasks_init(&cluster->quadruple_color_task);
     cluster->op_mode = SWITCH_OP_MODE_NORMAL;
 
     SETUP_ATTR(0, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_TYPE, ZCL_DATA_TYPE_ENUM8,
@@ -247,11 +267,16 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
                ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE, cluster->scene_group_id[1]);
     SETUP_ATTR(17, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET2,
                ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->scene_lockout_s[1]);
+    SETUP_ATTR(18, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_LEVEL,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->quadruple_level_pct);
+    SETUP_ATTR(19, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_COLOR_TEMP,
+               ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE,
+               cluster->quadruple_color_temp_k);
 
     // Configuration
     endpoint->clusters[endpoint->cluster_count].cluster_id =
         ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG;
-    endpoint->clusters[endpoint->cluster_count].attribute_count = 18;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 20;
     endpoint->clusters[endpoint->cluster_count].attributes      = cluster->attr_infos;
     endpoint->clusters[endpoint->cluster_count].is_server       = 1;
     endpoint->cluster_count++;
@@ -298,6 +323,14 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
 
     // Output Scenes (fork): RecallScene to bound lamps or groups
     endpoint->clusters[endpoint->cluster_count].cluster_id      = ZCL_CLUSTER_SCENES;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 0;
+    endpoint->clusters[endpoint->cluster_count].attributes      = NULL;
+    endpoint->clusters[endpoint->cluster_count].is_server       = 0;
+    endpoint->cluster_count++;
+
+    // Output Color Control (fork): colour temperature for Light on Quadruple
+    endpoint->clusters[endpoint->cluster_count].cluster_id =
+        ZCL_CLUSTER_COLOR_CONTROL;
     endpoint->clusters[endpoint->cluster_count].attribute_count = 0;
     endpoint->clusters[endpoint->cluster_count].attributes      = NULL;
     endpoint->clusters[endpoint->cluster_count].is_server       = 0;
@@ -876,6 +909,12 @@ static void switch_cluster_load_gestures_from_nv(zigbee_switch_cluster *cluster)
 
     cluster->current_scene[0] = cluster->last_scene[0];
     cluster->current_scene[1] = cluster->last_scene[1];
+
+    cluster->quadruple_level_pct = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_QUADRUPLE_LEVEL(idx), QUADRUPLE_LEVEL_DEFAULT_PCT, 0, 100);
+    cluster->quadruple_color_temp_k = switch_cluster_load_u16(
+        NV_ITEM_SWITCH_QUADRUPLE_COLOR_TEMP(idx), QUADRUPLE_COLOR_TEMP_DEFAULT_K,
+        QUADRUPLE_COLOR_TEMP_MIN_K, QUADRUPLE_COLOR_TEMP_MAX_K);
 }
 
 // The on/off flag is written to NV only when it changes
@@ -898,6 +937,8 @@ static void switch_cluster_restore_indicator(zigbee_switch_cluster *cluster) {
     if (hal_zigbee_get_network_status() == HAL_ZIGBEE_NETWORK_JOINED) {
         led_off(cluster->indicator_led);
         sync_switch_indicator_led(cluster);
+        // The LED may also show a relay (e.g. L-only: one LED for both)
+        update_relay_clusters();
     } else {
         // Same pattern as the "not connected" network indicator
         led_blink(cluster->indicator_led, 500, 500, LED_BLINK_FOREVER);
@@ -932,7 +973,8 @@ static void switch_cluster_enter_scenes(zigbee_switch_cluster *cluster,
     uint8_t count = cluster->scene_count[set];
 
     if (count == 0) {
-        return; // Set is off
+        switch_cluster_play_sos(cluster); // Set is off
+        return;
     }
     if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
         return;
@@ -949,7 +991,55 @@ static void switch_cluster_enter_scenes(zigbee_switch_cluster *cluster,
     switch_cluster_set_onoff_flag(cluster, 1);
     switch_cluster_restart_lockout(cluster, set);
     hal_tasks_unschedule(&cluster->led_task);
+    cluster->sos_step = 0;
     hal_tasks_schedule(&cluster->led_task, 0);
+}
+
+// "Scene set off": SOS once on the LED, only if it is not blinking for
+// something else (e.g. not connected)
+static void switch_cluster_play_sos(zigbee_switch_cluster *cluster) {
+    if (cluster->indicator_led == NULL ||
+        cluster->indicator_led->blink_times_left != 0 ||
+        cluster->op_mode != SWITCH_OP_MODE_NORMAL) {
+        return;
+    }
+    hal_tasks_unschedule(&cluster->led_task);
+    cluster->sos_step = 1;
+    hal_tasks_schedule(&cluster->led_task, 0);
+}
+
+// Light on Quadruple: level now, colour temperature a bit later (a lamp
+// that is off may ignore a colour command). One-shot, no mode.
+static void switch_cluster_light_on_quadruple(zigbee_switch_cluster *cluster) {
+    if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
+        return;
+    }
+    uint8_t level = (uint8_t)(((uint16_t)cluster->quadruple_level_pct *
+                               LAMP_LEVEL_MAX + 50) / 100);
+    hal_zigbee_cmd c = build_level_move_to_level_onoff_cmd(cluster->endpoint,
+                                                           level);
+    hal_zigbee_send_cmd_to_bindings(&c);
+
+    hal_tasks_unschedule(&cluster->quadruple_color_task);
+    if (level == 0) {
+        switch_cluster_set_onoff_flag(cluster, 0); // Level 0 % = off
+        return;
+    }
+    switch_cluster_set_onoff_flag(cluster, 1);
+    hal_tasks_schedule(&cluster->quadruple_color_task,
+                       QUADRUPLE_COLOR_DELAY_MS);
+}
+
+static void switch_cluster_quadruple_color_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
+        return;
+    }
+    uint32_t       kelvin = cluster->quadruple_color_temp_k;
+    uint16_t       mireds = (uint16_t)((1000000UL + kelvin / 2) / kelvin);
+    hal_zigbee_cmd c      = build_move_to_color_temp_cmd(cluster->endpoint, mireds);
+    hal_zigbee_send_cmd_to_bindings(&c);
 }
 
 // Short click in scene mode: next scene of the set, wrapping
@@ -977,6 +1067,7 @@ static void switch_cluster_leave_op_mode(zigbee_switch_cluster *cluster) {
     cluster->reset_wait_release = 0;
     hal_tasks_unschedule(&cluster->mode_task);
     hal_tasks_unschedule(&cluster->led_task);
+    cluster->sos_step = 0;
 
     if (prev == SWITCH_OP_MODE_SCENES_SET1 ||
         prev == SWITCH_OP_MODE_SCENES_SET2) {
@@ -996,6 +1087,28 @@ static void switch_cluster_leave_op_mode(zigbee_switch_cluster *cluster) {
 
 static void switch_cluster_led_task_handler(void *arg) {
     zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (cluster->sos_step != 0) {
+        // SOS: step 1, 3, 5.. = mark on; 2, 4, 6.. = gap off
+        uint8_t step = cluster->sos_step - 1;
+        uint8_t mark = step / 2;
+        if (mark >= SOS_MARKS || cluster->indicator_led == NULL) {
+            cluster->sos_step = 0;
+            switch_cluster_restore_indicator(cluster);
+            return;
+        }
+        uint16_t delay;
+        if ((step & 1) == 0) {
+            led_on(cluster->indicator_led);
+            delay = (mark >= 3 && mark < 6) ? SOS_LONG_MS : SOS_SHORT_MS;
+        } else {
+            led_off(cluster->indicator_led);
+            delay = SOS_GAP_MS;
+        }
+        cluster->sos_step++;
+        hal_tasks_schedule(&cluster->led_task, delay);
+        return;
+    }
 
     if (cluster->op_mode != SWITCH_OP_MODE_SCENES_SET1 &&
         cluster->op_mode != SWITCH_OP_MODE_SCENES_SET2) {
@@ -1048,6 +1161,8 @@ static void switch_cluster_on_click_gesture(zigbee_switch_cluster *cluster,
             switch_cluster_enter_scenes(cluster, 0);
         } else if (count == 3) {
             switch_cluster_enter_scenes(cluster, 1);
+        } else if (count == 4) {
+            switch_cluster_light_on_quadruple(cluster);
         }
         break;
 
@@ -1057,7 +1172,7 @@ static void switch_cluster_on_click_gesture(zigbee_switch_cluster *cluster,
             switch_cluster_next_scene(
                 cluster, cluster->op_mode == SWITCH_OP_MODE_SCENES_SET1 ? 0 : 1);
         }
-        // Double / Triple click: no effect
+        // Double / Triple / Quadruple click: no effect
         break;
 
     case SWITCH_OP_MODE_RESET_ARMED:
@@ -1089,8 +1204,10 @@ static void switch_cluster_gesture_task_handler(void *arg) {
         switch_cluster_report_gesture(cluster, MULTISTATE_DOUBLE_CLICK);
     } else if (count == 3) {
         switch_cluster_report_gesture(cluster, MULTISTATE_TRIPLE_CLICK);
+    } else if (count == 4) {
+        switch_cluster_report_gesture(cluster, MULTISTATE_QUADRUPLE_CLICK);
     } else if (cluster->op_mode != SWITCH_OP_MODE_RESET_ARMED) {
-        return; // 4+ presses: ignored
+        return; // 5+ presses: ignored
     }
     switch_cluster_on_click_gesture(cluster, count);
 }
@@ -1112,6 +1229,7 @@ static void switch_cluster_very_long_task_handler(void *arg) {
     cluster->op_mode            = SWITCH_OP_MODE_RESET_ARMED;
     cluster->reset_wait_release = 1;
     hal_tasks_unschedule(&cluster->led_task);
+    cluster->sos_step = 0;
     if (cluster->indicator_led != NULL) {
         led_blink(cluster->indicator_led, RESET_LED_ON_MS, RESET_LED_OFF_MS,
                   LED_BLINK_FOREVER);
@@ -1488,6 +1606,24 @@ static bool switch_cluster_on_write_gesture_attr(zigbee_switch_cluster *cluster,
                                 cluster->scene_lockout_s[set]);
         return true;
     }
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_LEVEL:
+        if (cluster->quadruple_level_pct > 100) {
+            cluster->quadruple_level_pct = 100;
+        }
+        switch_cluster_store_u8(NV_ITEM_SWITCH_QUADRUPLE_LEVEL(idx),
+                                cluster->quadruple_level_pct);
+        return true;
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_QUADRUPLE_COLOR_TEMP:
+        if (cluster->quadruple_color_temp_k < QUADRUPLE_COLOR_TEMP_MIN_K) {
+            cluster->quadruple_color_temp_k = QUADRUPLE_COLOR_TEMP_MIN_K;
+        } else if (cluster->quadruple_color_temp_k > QUADRUPLE_COLOR_TEMP_MAX_K) {
+            cluster->quadruple_color_temp_k = QUADRUPLE_COLOR_TEMP_MAX_K;
+        }
+        switch_cluster_store_u16(NV_ITEM_SWITCH_QUADRUPLE_COLOR_TEMP(idx),
+                                 cluster->quadruple_color_temp_k);
+        return true;
     }
     return false;
 }
