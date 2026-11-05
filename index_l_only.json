@@ -1,12 +1,12 @@
 [
   {
-    "fileName": "tlc_switch-1.1.3-e66ce0d1.zigbee",
-    "fileVersion": 285421577,
-    "fileSize": 157970,
-    "url": "https://raw.githubusercontent.com/teodtodo-ai/tuya-zigbee-switch/refs/heads/smart-dimming-ota/e66ce0d1/l_only_end_device/tlc_switch-1.1.3-e66ce0d1.zigbee",
+    "fileName": "tlc_switch-1.1.3-deaaaa12.zigbee",
+    "fileVersion": 285421578,
+    "fileSize": 158738,
+    "url": "https://raw.githubusercontent.com/teodtodo-ai/tuya-zigbee-switch/refs/heads/smart-dimming-ota/deaaaa12/l_only_end_device/tlc_switch-1.1.3-deaaaa12.zigbee",
     "imageType": 43632,
     "manufacturerCode": 4417,
-    "sha512": "3b31bf1f990d3be18ec45c4399e3b5599aa32914d1186fea09183a609710d405046a1f9cae2ab773b117f77a108381ceda032f3c5bb0226ef749310ec91d1825",
+    "sha512": "0705e37f994424b563dd4b8b9eedfbf86df26b0bf9643dc0df8cb8d459bcb48cf0e0d47dd9bd142c91a41a63da165ae2e39bc2c1562acd6470c8df15e693cb1e",
     "otaHeaderString": "Telink OTA Image",
     "manufacturerName": [
       "_TZ3002_xkxgfxsg",
