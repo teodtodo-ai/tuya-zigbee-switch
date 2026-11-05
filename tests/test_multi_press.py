@@ -139,10 +139,12 @@ def level_cmds(dev: Device, pair: RelayButtonPair) -> list:
 
 
 def multistate_reports(dev: Device, pair: RelayButtonPair) -> list[int]:
+    """Multistate values sent to Z2M, in order: explicit reports (gestures)
+    and changes picked up by the periodic reporting (long press)."""
     sync(dev)
     res = []
     for e in dev._events:
-        if e.kind != "zcl_attr_change":
+        if e.kind not in ("zcl_attr_change", "zcl_report"):
             continue
         if (
             int(e.payload["ep"]) == pair.switch_endpoint
@@ -218,6 +220,38 @@ def test_press_alone_is_not_reported(gdev: Device, relay_button_pair):
     press(gdev, pair)
     release(gdev, pair)
     assert multistate_reports(gdev, pair) == []
+
+
+def test_gestures_use_explicit_reports(gdev: Device, relay_button_pair):
+    """On Telink the periodic reporting would miss a value that is set and
+    reset right away, so gestures must be sent as explicit reports."""
+    pair = relay_button_pair
+    clicks(gdev, pair, 2)
+    explicit = [
+        int(e.payload["value"])
+        for e in gdev._events
+        if e.kind == "zcl_report"
+        and int(e.payload["cluster"], 16) == ZCL_CLUSTER_MULTISTATE_INPUT_BASIC
+    ]
+    assert explicit == [MS_DOUBLE, MS_RELEASED]
+
+
+def test_press_does_not_change_multistate(gdev: Device, relay_button_pair):
+    """Telink reports every change of the value, so a press must not touch it."""
+    pair = relay_button_pair
+    press(gdev, pair)
+    assert gdev.zcl_switch_get_multistate_value(pair.switch_endpoint) == "0"
+    release(gdev, pair)
+    assert gdev.zcl_switch_get_multistate_value(pair.switch_endpoint) == "0"
+    gdev.step_time(CONFIRM_MS)
+    sync(gdev)
+    changes = [
+        int(e.payload["value"])
+        for e in gdev._events
+        if e.kind == "zcl_attr_change"
+        and int(e.payload["cluster"], 16) == ZCL_CLUSTER_MULTISTATE_INPUT_BASIC
+    ]
+    assert changes == []
 
 
 def test_long_click_is_reported(gdev: Device, relay_button_pair):

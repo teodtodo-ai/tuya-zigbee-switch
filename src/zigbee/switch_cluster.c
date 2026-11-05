@@ -517,8 +517,7 @@ void switch_cluster_on_read_rsp(uint16_t src_addr, uint8_t endpoint,
     // The state is cleared on every new press, so later answers are never
     // used.
     if (cluster->mode == ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_TOGGLE ||
-        !cluster->button->pressed ||
-        cluster->multistate_state != MULTISTATE_PRESS ||
+        !cluster->button->pressed || !cluster->lamp_answers_open ||
         (hal_millis() - cluster->lamp_req_ms) > LAMP_ANSWER_WINDOW_MS) {
         return;
     }
@@ -776,18 +775,25 @@ static void switch_cluster_multi_press_trampoline(void *arg, uint8_t count) {
     }
 }
 
-// Report a confirmed gesture to Z2M, then go back to "released" so the same
-// gesture twice in a row is reported twice.
+// Send the current multistate value as an explicit attribute report. The
+// periodic reporting only sees a value that is still set when it runs, so a
+// short event (a gesture) must be sent explicitly.
+static void switch_cluster_send_multistate_report(zigbee_switch_cluster *cluster) {
+    hal_zigbee_send_report_attr(cluster->endpoint,
+                                ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+                                ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE,
+                                ZCL_DATA_TYPE_UINT16, &cluster->multistate_state,
+                                sizeof(cluster->multistate_state));
+}
+
+// Report a confirmed gesture to Z2M, then "released", so the same gesture
+// twice in a row is two changes for Home Assistant.
 static void switch_cluster_report_gesture(zigbee_switch_cluster *cluster,
                                           uint16_t value) {
     cluster->multistate_state = value;
-    hal_zigbee_notify_attribute_changed(cluster->endpoint,
-                                        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
-                                        ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+    switch_cluster_send_multistate_report(cluster);
     cluster->multistate_state = MULTISTATE_NOT_PRESSED;
-    hal_zigbee_notify_attribute_changed(cluster->endpoint,
-                                        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
-                                        ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+    switch_cluster_send_multistate_report(cluster);
 }
 
 static void switch_cluster_store_u8(uint8_t item_id, uint8_t value) {
@@ -1125,10 +1131,12 @@ static void switch_cluster_gesture_on_press(zigbee_switch_cluster *cluster) {
     } else {
         cluster->gesture_count = 1;
     }
-    cluster->gesture_long     = 0;
-    cluster->press_op_mode    = cluster->op_mode;
-    cluster->click_press_ms   = cluster->button->pressed_at_ms;
-    cluster->multistate_state = MULTISTATE_PRESS; // Not reported
+    cluster->gesture_long      = 0;
+    cluster->press_op_mode     = cluster->op_mode;
+    cluster->click_press_ms    = cluster->button->pressed_at_ms;
+    cluster->press_seen        = 1;
+    cluster->lamp_answers_open = 0;
+    // The multistate value is not touched: a press alone is not reported
 
     hal_tasks_unschedule(&cluster->very_long_task);
     hal_tasks_schedule(&cluster->very_long_task,
@@ -1142,6 +1150,7 @@ static void switch_cluster_gesture_on_press(zigbee_switch_cluster *cluster) {
                               cluster->dimming_reset_window_ms > 0 &&
                               (hal_millis() - cluster->last_dim_end_ms) <=
                               cluster->dimming_reset_window_ms;
+        cluster->lamp_answers_open = 1;
         switch_cluster_request_lamp_state(cluster);
     } else {
         cluster->lamps_cnt = 0;
@@ -1162,6 +1171,7 @@ static void switch_cluster_gesture_on_long_press(zigbee_switch_cluster *cluster)
         switch_cluster_leave_op_mode(cluster);
         cluster->dim_hold = 0;
     }
+    cluster->lamp_answers_open = 0;
 
     cluster->multistate_state = MULTISTATE_LONG_PRESS;
     hal_zigbee_notify_attribute_changed(cluster->endpoint,
@@ -1170,6 +1180,12 @@ static void switch_cluster_gesture_on_long_press(zigbee_switch_cluster *cluster)
 }
 
 static void switch_cluster_gesture_on_release(zigbee_switch_cluster *cluster) {
+    // Release without a seen press: the button was held at boot. Ignore it.
+    if (!cluster->press_seen) {
+        return;
+    }
+    cluster->press_seen        = 0;
+    cluster->lamp_answers_open = 0;
     hal_tasks_unschedule(&cluster->very_long_task);
 
     if (cluster->gesture_long) {
@@ -1200,8 +1216,7 @@ static void switch_cluster_gesture_on_release(zigbee_switch_cluster *cluster) {
     // measured from the release edge
     uint32_t since = hal_millis() - cluster->button->released_at_ms;
 
-    cluster->multistate_state = MULTISTATE_NOT_PRESSED; // Not reported
-    cluster->gesture_pending  = 1;
+    cluster->gesture_pending = 1;
     hal_tasks_unschedule(&cluster->gesture_task);
     hal_tasks_schedule(&cluster->gesture_task,
                        since < cluster->multi_press_window_ms
@@ -1250,7 +1265,7 @@ void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
                           (hal_millis() - cluster->last_dim_end_ms) <=
                           cluster->dimming_reset_window_ms;
 
-    // Must be after multistate_state = PRESS so answers are accepted
+    cluster->lamp_answers_open = 1;
     switch_cluster_request_lamp_state(cluster);
 }
 
@@ -1274,17 +1289,18 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         return;
     }
 
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_gesture_on_release(cluster);
+        return;
+    }
+
     // Release without a seen press: the button was already held at boot
     // (btn_init marks it pressed without calling on_press). Ignore it,
     // otherwise it is sent as a phantom short press.
     if (cluster->multistate_state == MULTISTATE_NOT_PRESSED) {
         return;
     }
-
-    if (switch_cluster_gestures_active(cluster)) {
-        switch_cluster_gesture_on_release(cluster);
-        return;
-    }
+    cluster->lamp_answers_open = 0;
 
     if (cluster->multistate_state != MULTISTATE_LONG_PRESS) {
         if (cluster->relay_mode == ZCL_ONOFF_CONFIGURATION_RELAY_MODE_SHORT) {
@@ -1326,6 +1342,7 @@ void switch_cluster_on_button_long_press(zigbee_switch_cluster *cluster) {
     }
 
     switch_cluster_level_control(cluster);
+    cluster->lamp_answers_open = 0;
 
     cluster->multistate_state = MULTISTATE_LONG_PRESS;
     hal_zigbee_notify_attribute_changed(cluster->endpoint,

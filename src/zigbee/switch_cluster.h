@@ -80,6 +80,8 @@ typedef struct {
     uint8_t                          gesture_pending;       // waiting for the window
     uint8_t                          gesture_long;          // this press is a Long click
     uint8_t                          press_op_mode;         // op_mode at the press edge
+    uint8_t                          press_seen;            // press edge seen (gestures)
+    uint8_t                          lamp_answers_open;     // lamp answers accepted now
     uint32_t                         click_press_ms;        // press edge of last click
     hal_task_t                       gesture_task;          // multi-press window
     hal_task_t                       very_long_task;        // 15 s hold
