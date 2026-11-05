@@ -1,5 +1,6 @@
 #include "hal/zigbee.h"
 #include "stub/machine_io.h"
+#include "stub/stub_app.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -144,17 +145,20 @@ void hal_zigbee_register_on_read_rsp_callback(
     io_log("ZIGBEE", "Registered read response callback");
 }
 
-void stub_zigbee_simulate_read_rsp(uint8_t endpoint, uint16_t cluster_id,
+void stub_zigbee_simulate_read_rsp(uint16_t src_addr, uint8_t endpoint,
+                                   uint16_t cluster_id,
                                    uint16_t attribute_id, uint8_t status,
                                    uint8_t data_type, const uint8_t *value) {
     io_log("ZIGBEE",
-           "Simulating read rsp: ep=%d cluster=0x%04x attr=0x%04x status=0x%02x",
-           endpoint, cluster_id, attribute_id, status);
+           "Simulating read rsp: src=0x%04x ep=%d cluster=0x%04x attr=0x%04x "
+           "status=0x%02x",
+           src_addr, endpoint, cluster_id, attribute_id, status);
     if (zcl_activity_callback != NULL) {
         zcl_activity_callback();
     }
     if (read_rsp_callback != NULL) {
-        read_rsp_callback(endpoint, cluster_id, attribute_id, status, data_type,
+        read_rsp_callback(src_addr, endpoint, cluster_id, attribute_id, status,
+                          data_type,
                           status == 0 ? value : NULL);
     }
 }
@@ -177,8 +181,16 @@ void hal_zigbee_notify_attribute_changed(uint8_t endpoint, uint16_t cluster_id,
     // Calling it from notify_attribute_changed() causes recursion when the
     // application updates attributes in response to a write.
     // Instead, emit an event so Python tests can observe the change.
-    io_evt("zcl_attr_change ep=%u cluster=0x%04X attr=0x%04X", endpoint,
-           cluster_id, attribute_id);
+    // The value at the moment of the change is included, so tests can see
+    // values that change again right after (e.g. a reported gesture).
+    hal_zigbee_attribute *attr = stub_app_find_attr(endpoint, cluster_id,
+                                                    attribute_id);
+    char        buf[64];
+    const char *val = attr != NULL
+                    ? stub_app_attribute_value_to_string(attr, buf, sizeof(buf))
+                    : "?";
+    io_evt("zcl_attr_change ep=%u cluster=0x%04X attr=0x%04X value=%s",
+           endpoint, cluster_id, attribute_id, val);
 }
 
 hal_zigbee_status_t hal_zigbee_send_cmd_to_bindings(const hal_zigbee_cmd *cmd) {

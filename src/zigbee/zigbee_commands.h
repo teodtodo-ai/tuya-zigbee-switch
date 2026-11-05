@@ -101,6 +101,31 @@ static inline hal_zigbee_cmd build_read_attr_cmd(uint8_t endpoint,
     return c;
 }
 
+// Scenes RecallScene(group, scene), sent to bindings of the Scenes cluster.
+static inline hal_zigbee_cmd build_recall_scene_cmd(uint8_t endpoint,
+                                                    uint16_t group_id,
+                                                    uint8_t scene_id) {
+    static uint8_t buf[3];
+
+    buf[0] = (uint8_t)(group_id & 0xFF);
+    buf[1] = (uint8_t)(group_id >> 8);
+    buf[2] = scene_id;
+
+    hal_zigbee_cmd c = {
+        .endpoint            = endpoint,
+        .profile_id          = ZCL_HA_PROFILE,
+        .cluster_id          = ZCL_CLUSTER_SCENES,
+        .command_id          = ZCL_CMD_SCENES_RECALL_SCENE,
+        .cluster_specific    =                               1,
+        .direction           = HAL_ZIGBEE_DIR_CLIENT_TO_SERVER,
+        .disable_default_rsp =                               1,
+        .manufacturer_code   =                               0,
+        .payload             = buf,
+        .payload_len         = sizeof(buf),
+    };
+    return c;
+}
+
 static inline hal_zigbee_cmd build_level_stop_onoff_cmd(uint8_t endpoint) {
     hal_zigbee_cmd c = {
         .endpoint            = endpoint,

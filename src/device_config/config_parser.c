@@ -62,7 +62,9 @@ uint8_t cover_switch_clusters_cnt = 0;
 zigbee_cover_cluster cover_clusters[3];
 uint8_t cover_clusters_cnt = 0;
 
-hal_zigbee_cluster  clusters[32];
+// Fork: 48 (was 32). Each switch endpoint has 6 clusters since the Scenes
+// output; the 4-gang test config with covers needs 40, plus poll control.
+hal_zigbee_cluster  clusters[48];
 hal_zigbee_endpoint endpoints[10];
 
 uint8_t allow_simultaneous_latching_pulses = 0;

@@ -21,6 +21,10 @@ const uint16_t multistate_num_of_states  = 3;
 #define MULTISTATE_LONG_PRESS      2
 #define MULTISTATE_POSITION_ON     3
 #define MULTISTATE_POSITION_OFF    4
+// Fork: confirmed multi-press gestures (Layer 1 reports)
+#define MULTISTATE_SINGLE_CLICK    5
+#define MULTISTATE_DOUBLE_CLICK    6
+#define MULTISTATE_TRIPLE_CLICK    7
 
 extern zigbee_relay_cluster relay_clusters[];
 extern uint8_t relay_clusters_cnt;
@@ -44,8 +48,34 @@ extern uint8_t switch_clusters_cnt;
 #define LAMP_LEVEL_FROM_OFF                (LAMP_LEVEL_MIN + 1)
 // Move up is sent this long after MoveToLevel, so it reaches the lamp second
 #define DIM_UP_DELAY_MS                    250
-#define LAMP_STATE_ONOFF_VALID             0x01
-#define LAMP_STATE_LEVEL_VALID             0x02
+// switch_lamp_state_t.flags
+#define LAMP_ONOFF_VALID                   0x01
+#define LAMP_IS_ON                         0x02
+#define LAMP_LEVEL_VALID                   0x04
+// Lamp answers are collected this long after the press edge
+#define LAMP_ANSWER_WINDOW_MS              200
+// Lamps count as on when at least this % of the answering lamps are on
+#define LAMP_ON_QUORUM_PCT                 60
+
+// Multi-press gestures (fork). Active only for a momentary switch whose
+// relay is detached and whose binded mode is "short press".
+#define MULTI_PRESS_WINDOW_DEFAULT_MS    250
+#define MULTI_PRESS_WINDOW_MIN_MS        100
+#define MULTI_PRESS_WINDOW_MAX_MS        400
+#define VERY_LONG_HOLD_MS                15000
+#define RESET_CONFIRM_WINDOW_MS          3000
+#define SCENE_COUNT_MAX                  10
+#define SCENE_SET2_FIRST_ID              10
+#define SCENE_LOCKOUT_DEFAULT_S          10
+#define SCENE_LOCKOUT_MIN_S              5
+#define SCENE_LOCKOUT_MAX_S              15
+// Scene mode LED: N short blinks, pause, repeated
+#define SCENE_LED_PERIOD_MS              1500
+#define SCENE_LED_ON_MS                  120
+#define SCENE_LED_OFF_MS                 180
+// Reset armed LED: fast blinking
+#define RESET_LED_ON_MS                  80
+#define RESET_LED_OFF_MS                 80
 
 typedef struct {
     uint8_t threshold_pct;
@@ -68,6 +98,23 @@ void switch_cluster_on_button_long_press(zigbee_switch_cluster *cluster);
 static void switch_cluster_dim_up_task_handler(void *arg);
 static bool switch_cluster_has_valid_relay(
     const zigbee_switch_cluster *cluster);
+
+// Multi-press gestures (fork)
+static bool switch_cluster_gestures_active(const zigbee_switch_cluster *cluster);
+static void switch_cluster_load_gestures_from_nv(zigbee_switch_cluster *cluster);
+static void switch_cluster_gesture_task_handler(void *arg);
+static void switch_cluster_very_long_task_handler(void *arg);
+static void switch_cluster_mode_task_handler(void *arg);
+static void switch_cluster_led_task_handler(void *arg);
+static void switch_cluster_multi_press_trampoline(void *arg, uint8_t count);
+static void switch_cluster_leave_op_mode(zigbee_switch_cluster *cluster);
+static void switch_cluster_set_onoff_flag(zigbee_switch_cluster *cluster,
+                                          uint8_t value);
+static void switch_cluster_update_flag_after_dim(zigbee_switch_cluster *cluster);
+static void switch_cluster_report_gesture(zigbee_switch_cluster *cluster,
+                                          uint16_t value);
+static bool switch_cluster_on_write_gesture_attr(zigbee_switch_cluster *cluster,
+                                                 uint16_t attribute_id);
 
 zigbee_switch_cluster *switch_cluster_by_endpoint[10];
 
@@ -129,6 +176,7 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     cluster->endpoint = endpoint->endpoint;
     switch_cluster_load_attrs_from_nv(cluster);
     switch_cluster_load_dimming_from_nv(cluster);
+    switch_cluster_load_gestures_from_nv(cluster);
 
     cluster->button->on_press =
         (ev_button_callback_t)switch_cluster_on_button_press;
@@ -137,10 +185,27 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     cluster->button->on_long_press =
         (ev_button_callback_t)switch_cluster_on_button_long_press;
     cluster->button->callback_param = cluster;
+    // The "N quick presses = factory reset" counter would fire while cycling
+    // scenes, so it is replaced by the 15 s hold when gestures are active.
+    cluster->orig_on_multi_press    = cluster->button->on_multi_press;
+    cluster->button->on_multi_press = switch_cluster_multi_press_trampoline;
 
     cluster->dim_up_task.handler = switch_cluster_dim_up_task_handler;
     cluster->dim_up_task.arg     = cluster;
     hal_tasks_init(&cluster->dim_up_task);
+    cluster->gesture_task.handler = switch_cluster_gesture_task_handler;
+    cluster->gesture_task.arg     = cluster;
+    hal_tasks_init(&cluster->gesture_task);
+    cluster->very_long_task.handler = switch_cluster_very_long_task_handler;
+    cluster->very_long_task.arg     = cluster;
+    hal_tasks_init(&cluster->very_long_task);
+    cluster->mode_task.handler = switch_cluster_mode_task_handler;
+    cluster->mode_task.arg     = cluster;
+    hal_tasks_init(&cluster->mode_task);
+    cluster->led_task.handler = switch_cluster_led_task_handler;
+    cluster->led_task.arg     = cluster;
+    hal_tasks_init(&cluster->led_task);
+    cluster->op_mode = SWITCH_OP_MODE_NORMAL;
 
     SETUP_ATTR(0, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_TYPE, ZCL_DATA_TYPE_ENUM8,
                ATTR_READONLY, cluster->mode);
@@ -165,11 +230,28 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     SETUP_ATTR(9, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_RESET_WINDOW,
                ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE,
                cluster->dimming_reset_window_ms);
+    SETUP_ATTR(10, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_SYNC,
+               ZCL_DATA_TYPE_BOOLEAN, ATTR_WRITABLE, cluster->dimming_sync);
+    SETUP_ATTR(11, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_MULTI_PRESS_WINDOW,
+               ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE,
+               cluster->multi_press_window_ms);
+    SETUP_ATTR(12, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET1,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->scene_count[0]);
+    SETUP_ATTR(13, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET1,
+               ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE, cluster->scene_group_id[0]);
+    SETUP_ATTR(14, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET1,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->scene_lockout_s[0]);
+    SETUP_ATTR(15, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET2,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->scene_count[1]);
+    SETUP_ATTR(16, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET2,
+               ZCL_DATA_TYPE_UINT16, ATTR_WRITABLE, cluster->scene_group_id[1]);
+    SETUP_ATTR(17, ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET2,
+               ZCL_DATA_TYPE_UINT8, ATTR_WRITABLE, cluster->scene_lockout_s[1]);
 
     // Configuration
     endpoint->clusters[endpoint->cluster_count].cluster_id =
         ZCL_CLUSTER_ON_OFF_SWITCH_CONFIG;
-    endpoint->clusters[endpoint->cluster_count].attribute_count = 10;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 18;
     endpoint->clusters[endpoint->cluster_count].attributes      = cluster->attr_infos;
     endpoint->clusters[endpoint->cluster_count].is_server       = 1;
     endpoint->cluster_count++;
@@ -209,6 +291,13 @@ void switch_cluster_add_to_endpoint(zigbee_switch_cluster *cluster,
     // Output Level for other devices
     endpoint->clusters[endpoint->cluster_count].cluster_id =
         ZCL_CLUSTER_LEVEL_CONTROL;
+    endpoint->clusters[endpoint->cluster_count].attribute_count = 0;
+    endpoint->clusters[endpoint->cluster_count].attributes      = NULL;
+    endpoint->clusters[endpoint->cluster_count].is_server       = 0;
+    endpoint->cluster_count++;
+
+    // Output Scenes (fork): RecallScene to bound lamps or groups
+    endpoint->clusters[endpoint->cluster_count].cluster_id      = ZCL_CLUSTER_SCENES;
     endpoint->clusters[endpoint->cluster_count].attribute_count = 0;
     endpoint->clusters[endpoint->cluster_count].attributes      = NULL;
     endpoint->clusters[endpoint->cluster_count].is_server       = 0;
@@ -375,7 +464,8 @@ void switch_cluster_level_stop(zigbee_switch_cluster *cluster) {
 // Ask bound lamp(s) for their current state. Answers arrive asynchronously in
 // switch_cluster_on_read_rsp() and are only used for this same press.
 static void switch_cluster_request_lamp_state(zigbee_switch_cluster *cluster) {
-    cluster->lamp_state_valid = 0;
+    cluster->lamps_cnt   = 0;
+    cluster->lamp_req_ms = hal_millis();
 
     if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
         return;
@@ -390,9 +480,29 @@ static void switch_cluster_request_lamp_state(zigbee_switch_cluster *cluster) {
     hal_zigbee_send_cmd_to_bindings(&c);
 }
 
-void switch_cluster_on_read_rsp(uint8_t endpoint, uint16_t cluster_id,
-                                uint16_t attribute_id, uint8_t status,
-                                uint8_t data_type, const uint8_t *value) {
+// Entry of the lamp with this address; a new one if it is not known yet.
+// NULL when the table is full (extra lamps are not counted).
+static switch_lamp_state_t *switch_cluster_lamp_slot(
+    zigbee_switch_cluster *cluster, uint16_t addr) {
+    for (uint8_t i = 0; i < cluster->lamps_cnt; i++) {
+        if (cluster->lamps[i].addr == addr) {
+            return &cluster->lamps[i];
+        }
+    }
+    if (cluster->lamps_cnt >= SWITCH_MAX_LAMPS) {
+        return NULL;
+    }
+    switch_lamp_state_t *slot = &cluster->lamps[cluster->lamps_cnt++];
+    slot->addr  = addr;
+    slot->level = 0;
+    slot->flags = 0;
+    return slot;
+}
+
+void switch_cluster_on_read_rsp(uint16_t src_addr, uint8_t endpoint,
+                                uint16_t cluster_id, uint16_t attribute_id,
+                                uint8_t status, uint8_t data_type,
+                                const uint8_t *value) {
     if (endpoint >= sizeof(switch_cluster_by_endpoint) /
         sizeof(switch_cluster_by_endpoint[0])) {
         return;
@@ -403,11 +513,13 @@ void switch_cluster_on_read_rsp(uint8_t endpoint, uint16_t cluster_id,
     }
 
     // Only store answers while a press is pending (button down, long press
-    // not started yet). The direction is decided at long-press start and the
-    // state is cleared on every new press, so later answers are never used.
+    // not started yet) and within the answer window after the press edge.
+    // The state is cleared on every new press, so later answers are never
+    // used.
     if (cluster->mode == ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_TOGGLE ||
         !cluster->button->pressed ||
-        cluster->multistate_state != MULTISTATE_PRESS) {
+        cluster->multistate_state != MULTISTATE_PRESS ||
+        (hal_millis() - cluster->lamp_req_ms) > LAMP_ANSWER_WINDOW_MS) {
         return;
     }
     if (status != ZCL_STATUS_SUCCESS || value == NULL) {
@@ -416,19 +528,57 @@ void switch_cluster_on_read_rsp(uint8_t endpoint, uint16_t cluster_id,
 
     if (cluster_id == ZCL_CLUSTER_ON_OFF && attribute_id == ZCL_ATTR_ONOFF &&
         data_type == ZCL_DATA_TYPE_BOOLEAN) {
-        // With several bound lamps, first valid answer wins
-        if (!(cluster->lamp_state_valid & LAMP_STATE_ONOFF_VALID)) {
-            cluster->lamp_on           = value[0] ? 1 : 0;
-            cluster->lamp_state_valid |= LAMP_STATE_ONOFF_VALID;
+        switch_lamp_state_t *lamp = switch_cluster_lamp_slot(cluster, src_addr);
+        // A lamp answering twice: its first valid answer wins
+        if (lamp != NULL && !(lamp->flags & LAMP_ONOFF_VALID)) {
+            lamp->flags |= LAMP_ONOFF_VALID | (value[0] ? LAMP_IS_ON : 0);
         }
     } else if (cluster_id == ZCL_CLUSTER_LEVEL_CONTROL &&
                attribute_id == ZCL_ATTR_LEVEL_CURRENT_LEVEL &&
                data_type == ZCL_DATA_TYPE_UINT8) {
-        if (!(cluster->lamp_state_valid & LAMP_STATE_LEVEL_VALID)) {
-            cluster->lamp_level        = value[0];
-            cluster->lamp_state_valid |= LAMP_STATE_LEVEL_VALID;
+        switch_lamp_state_t *lamp = switch_cluster_lamp_slot(cluster, src_addr);
+        if (lamp != NULL && !(lamp->flags & LAMP_LEVEL_VALID)) {
+            lamp->level  = value[0];
+            lamp->flags |= LAMP_LEVEL_VALID;
         }
     }
+}
+
+typedef struct {
+    uint8_t answered;    // lamps that sent their OnOff
+    uint8_t group_on;    // at least LAMP_ON_QUORUM_PCT of them are on
+    uint8_t level_valid; // at least one lit lamp sent its level
+    uint8_t level;       // average level of the lit lamps
+} lamp_summary_t;
+
+static void switch_cluster_lamp_summary(const zigbee_switch_cluster *cluster,
+                                        lamp_summary_t *s) {
+    uint16_t level_sum = 0;
+    uint8_t  level_cnt = 0;
+    uint8_t  on_cnt    = 0;
+
+    s->answered = 0;
+    for (uint8_t i = 0; i < cluster->lamps_cnt; i++) {
+        const switch_lamp_state_t *lamp = &cluster->lamps[i];
+        if (!(lamp->flags & LAMP_ONOFF_VALID)) {
+            continue;
+        }
+        s->answered++;
+        if (lamp->flags & LAMP_IS_ON) {
+            on_cnt++;
+            if (lamp->flags & LAMP_LEVEL_VALID) {
+                level_sum += lamp->level;
+                level_cnt++;
+            }
+        }
+    }
+    s->group_on = s->answered > 0 &&
+                  (uint16_t)on_cnt * 100 >=
+                  (uint16_t)LAMP_ON_QUORUM_PCT * s->answered;
+    s->level_valid = level_cnt > 0;
+    s->level       = level_cnt > 0
+                   ? (uint8_t)((level_sum + level_cnt / 2) / level_cnt)
+                   : 0;
 }
 
 static void switch_cluster_send_level_move(zigbee_switch_cluster *cluster,
@@ -441,42 +591,66 @@ static void switch_cluster_send_level_move(zigbee_switch_cluster *cluster,
     // Keep legacy alternation consistent: next fallback goes the other way
     cluster->level_move_direction =
         direction == ZCL_LEVEL_MOVE_DOWN ? ZCL_LEVEL_MOVE_UP : ZCL_LEVEL_MOVE_DOWN;
+    cluster->dim_active   = 1;
+    cluster->dim_dir      = direction;
+    cluster->dim_start_ms = hal_millis();
 }
 
 static void switch_cluster_dim_up_task_handler(void *arg) {
     zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
 
-    // Released before the delay ran out: Stop is already sent, stay low
+    // Released before the delay ran out: Stop is already sent, stay there
     if (!cluster->button->pressed ||
         cluster->multistate_state != MULTISTATE_LONG_PRESS) {
         return;
     }
-    switch_cluster_send_level_move(cluster, ZCL_LEVEL_MOVE_UP);
+    switch_cluster_send_level_move(cluster, cluster->delayed_move_dir);
+}
+
+// Send MoveToLevelWithOnOff(level) now and the Move in `direction` a bit
+// later, so the Move cannot overtake it on the way to the lamp.
+static void switch_cluster_move_to_level_then_move(
+    zigbee_switch_cluster *cluster, uint8_t level, uint8_t direction) {
+    hal_zigbee_cmd c = build_level_move_to_level_onoff_cmd(cluster->endpoint,
+                                                           level);
+
+    hal_zigbee_send_cmd_to_bindings(&c);
+    cluster->last_dim_direction   = direction;
+    cluster->level_move_direction =
+        direction == ZCL_LEVEL_MOVE_DOWN ? ZCL_LEVEL_MOVE_UP : ZCL_LEVEL_MOVE_DOWN;
+    cluster->delayed_move_dir = direction;
+    hal_tasks_schedule(&cluster->dim_up_task, DIM_UP_DELAY_MS);
 }
 
 void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
+    cluster->dim_active     = 0;
+    cluster->dim_sync_level = 0;
+
     if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
         return;
     }
 
-    uint8_t valid = cluster->lamp_state_valid;
+    lamp_summary_t s;
 
-    if (!(valid & LAMP_STATE_ONOFF_VALID)) {
-        // No answer from the lamp: legacy behaviour, alternate direction
+    switch_cluster_lamp_summary(cluster, &s);
+
+    if (s.answered == 0) {
+        // No answer from any lamp: legacy behaviour, alternate direction
         switch_cluster_send_level_move(cluster, cluster->level_move_direction);
         return;
     }
 
-    if (!cluster->lamp_on) {
-        // Lamp is off: switch it on just above minimum, then fade up. The
-        // Move is delayed so it cannot overtake MoveToLevel on the way to
-        // the lamp; if it is lost, the lamp stays on at the low level.
-        hal_zigbee_cmd c = build_level_move_to_level_onoff_cmd(
-            cluster->endpoint, LAMP_LEVEL_FROM_OFF);
-        hal_zigbee_send_cmd_to_bindings(&c);
-        cluster->last_dim_direction   = ZCL_LEVEL_MOVE_UP;
-        cluster->level_move_direction = ZCL_LEVEL_MOVE_DOWN;
-        hal_tasks_schedule(&cluster->dim_up_task, DIM_UP_DELAY_MS);
+    // Lamps are (or are about to be) on: this also corrects a flag that went
+    // stale because the lamps were switched from elsewhere
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_set_onoff_flag(cluster, 1);
+    }
+
+    if (!s.group_on) {
+        // Lamps are off: switch them on just above minimum, then fade up. If
+        // the Move is lost, the lamps stay on at the low level.
+        switch_cluster_move_to_level_then_move(cluster, LAMP_LEVEL_FROM_OFF,
+                                               ZCL_LEVEL_MOVE_UP);
         return;
     }
 
@@ -485,29 +659,554 @@ void switch_cluster_level_control(zigbee_switch_cluster *cluster) {
     if (cluster->dim_regrab) {
         // Pressed again shortly after the last dim: keep going the same way
         direction = cluster->last_dim_direction;
-    } else if (valid & LAMP_STATE_LEVEL_VALID) {
+    } else if (s.level_valid) {
         // level <= threshold% -> up, otherwise down
-        direction = ((uint16_t)cluster->lamp_level * 100 <=
+        direction = ((uint16_t)s.level * 100 <=
                      (uint16_t)cluster->dimming_threshold_pct * LAMP_LEVEL_MAX)
                   ? ZCL_LEVEL_MOVE_UP
                   : ZCL_LEVEL_MOVE_DOWN;
     } else {
-        // Lamp on, level unknown: dim down
+        // Lamps on, level unknown: dim down
         direction = ZCL_LEVEL_MOVE_DOWN;
     }
 
     // Never push against a limit we already sit at
-    if (valid & LAMP_STATE_LEVEL_VALID) {
-        if (direction == ZCL_LEVEL_MOVE_DOWN &&
-            cluster->lamp_level <= LAMP_LEVEL_MIN) {
+    if (s.level_valid) {
+        if (direction == ZCL_LEVEL_MOVE_DOWN && s.level <= LAMP_LEVEL_MIN) {
             direction = ZCL_LEVEL_MOVE_UP;
         } else if (direction == ZCL_LEVEL_MOVE_UP &&
-                   cluster->lamp_level >= LAMP_LEVEL_MAX) {
+                   s.level >= LAMP_LEVEL_MAX) {
             direction = ZCL_LEVEL_MOVE_DOWN;
         }
     }
 
+    if (cluster->dimming_sync && s.level_valid) {
+        // All lamps jump to the average level first, then dim together
+        uint8_t level = s.level < LAMP_LEVEL_FROM_OFF ? LAMP_LEVEL_FROM_OFF
+                                                      : s.level;
+        cluster->dim_sync_level = level;
+        switch_cluster_move_to_level_then_move(cluster, level, direction);
+        return;
+    }
+
     switch_cluster_send_level_move(cluster, direction);
+}
+
+// End of a dimming hold: Stop, remember it for the re-grab window and update
+// the on/off flag.
+static void switch_cluster_end_dimming(zigbee_switch_cluster *cluster) {
+    hal_tasks_unschedule(&cluster->dim_up_task);
+    switch_cluster_level_stop(cluster);
+    cluster->dim_stop_ms     = hal_millis();
+    cluster->last_dim_valid  = 1;
+    cluster->last_dim_end_ms = cluster->dim_stop_ms;
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_update_flag_after_dim(cluster);
+    }
+    cluster->dim_active = 0;
+}
+
+// Estimate whether the lamps are still on after a dim (no Read): a lamp that
+// was dimmed down for at least its starting level reached the minimum and
+// switched off. Flag = 0 if fewer than LAMP_ON_QUORUM_PCT stay on.
+static void switch_cluster_update_flag_after_dim(zigbee_switch_cluster *cluster) {
+    if (!cluster->dim_active) {
+        return; // No Move was sent: the flag was set when dimming started
+    }
+    if (cluster->dim_dir == ZCL_LEVEL_MOVE_UP) {
+        switch_cluster_set_onoff_flag(cluster, 1);
+        return;
+    }
+
+    uint32_t moved = (cluster->dim_stop_ms - cluster->dim_start_ms) *
+                     cluster->level_move_rate / 1000;
+
+    if (cluster->dim_sync_level != 0) {
+        switch_cluster_set_onoff_flag(cluster,
+                                      moved >= cluster->dim_sync_level ? 0 : 1);
+        return;
+    }
+
+    uint8_t answered = 0;
+    uint8_t still_on = 0;
+
+    for (uint8_t i = 0; i < cluster->lamps_cnt; i++) {
+        const switch_lamp_state_t *lamp = &cluster->lamps[i];
+        if (!(lamp->flags & LAMP_ONOFF_VALID)) {
+            continue;
+        }
+        answered++;
+        if ((lamp->flags & LAMP_IS_ON) &&
+            (!(lamp->flags & LAMP_LEVEL_VALID) || moved < lamp->level)) {
+            still_on++;
+        }
+    }
+    if (answered == 0) {
+        return; // Legacy dim without answers: nothing to estimate from
+    }
+    switch_cluster_set_onoff_flag(
+        cluster, (uint16_t)still_on * 100 >=
+        (uint16_t)LAMP_ON_QUORUM_PCT * answered);
+}
+
+// ---------------------------------------------------------------------------
+// Multi-press gestures (fork)
+//
+// Layer 1 turns presses into gestures: Short click, Long click, Double click,
+// Triple click and Very long hold (15 s). Layer 2 turns gestures into
+// actions depending on the operating mode. Only for a momentary switch whose
+// relay is detached and whose binded mode is "short press"; every other
+// configuration keeps the original behaviour.
+// ---------------------------------------------------------------------------
+
+static bool switch_cluster_gestures_active(const zigbee_switch_cluster *cluster) {
+    return cluster->mode != ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_TOGGLE &&
+           cluster->relay_mode == ZCL_ONOFF_CONFIGURATION_RELAY_MODE_DETACHED &&
+           cluster->binded_mode == ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT;
+}
+
+static void switch_cluster_multi_press_trampoline(void *arg, uint8_t count) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (switch_cluster_gestures_active(cluster)) {
+        return; // Factory reset is the 15 s hold instead
+    }
+    if (cluster->orig_on_multi_press != NULL) {
+        cluster->orig_on_multi_press(arg, count);
+    }
+}
+
+// Report a confirmed gesture to Z2M, then go back to "released" so the same
+// gesture twice in a row is reported twice.
+static void switch_cluster_report_gesture(zigbee_switch_cluster *cluster,
+                                          uint16_t value) {
+    cluster->multistate_state = value;
+    hal_zigbee_notify_attribute_changed(cluster->endpoint,
+                                        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+                                        ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+    cluster->multistate_state = MULTISTATE_NOT_PRESSED;
+    hal_zigbee_notify_attribute_changed(cluster->endpoint,
+                                        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+                                        ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+}
+
+static void switch_cluster_store_u8(uint8_t item_id, uint8_t value) {
+    static uint8_t buf;
+
+    buf = value;
+    hal_nvm_write(item_id, sizeof(buf), &buf);
+}
+
+static void switch_cluster_store_u16(uint8_t item_id, uint16_t value) {
+    static uint16_t buf;
+
+    buf = value;
+    hal_nvm_write(item_id, sizeof(buf), (uint8_t *)&buf);
+}
+
+// Stored value if it is present and in range, otherwise the default
+static uint8_t switch_cluster_load_u8(uint8_t item_id, uint8_t def,
+                                      uint8_t min, uint8_t max) {
+    uint8_t value;
+
+    if (hal_nvm_read(item_id, sizeof(value), &value) != HAL_NVM_SUCCESS) {
+        return def;
+    }
+    if (value < min || value > max) {
+        printf("Invalid value %d in NV item %02x, using default\r\n", value,
+               item_id);
+        return def;
+    }
+    return value;
+}
+
+static uint16_t switch_cluster_load_u16(uint8_t item_id, uint16_t def,
+                                        uint16_t min, uint16_t max) {
+    uint16_t value;
+
+    if (hal_nvm_read(item_id, sizeof(value), (uint8_t *)&value) !=
+        HAL_NVM_SUCCESS) {
+        return def;
+    }
+    if (value < min || value > max) {
+        printf("Invalid value %d in NV item %02x, using default\r\n", value,
+               item_id);
+        return def;
+    }
+    return value;
+}
+
+static void switch_cluster_load_gestures_from_nv(zigbee_switch_cluster *cluster) {
+    uint8_t idx = cluster->switch_idx;
+
+    cluster->dimming_sync =
+        switch_cluster_load_u8(NV_ITEM_SWITCH_DIMMING_SYNC(idx), 0, 0, 1);
+    cluster->multi_press_window_ms = switch_cluster_load_u16(
+        NV_ITEM_SWITCH_MULTI_PRESS_WINDOW(idx), MULTI_PRESS_WINDOW_DEFAULT_MS,
+        MULTI_PRESS_WINDOW_MIN_MS, MULTI_PRESS_WINDOW_MAX_MS);
+    cluster->onoff_flag =
+        switch_cluster_load_u8(NV_ITEM_SWITCH_ONOFF_FLAG(idx), 0, 0, 1);
+
+    cluster->scene_count[0] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_SCENE_COUNT_SET1(idx), 0, 0, SCENE_COUNT_MAX);
+    cluster->scene_group_id[0] = switch_cluster_load_u16(
+        NV_ITEM_SWITCH_SCENE_GROUP_ID_SET1(idx), 0, 0, 0xFFFF);
+    cluster->scene_lockout_s[0] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_SCENE_LOCKOUT_SET1(idx), SCENE_LOCKOUT_DEFAULT_S,
+        SCENE_LOCKOUT_MIN_S, SCENE_LOCKOUT_MAX_S);
+    cluster->last_scene[0] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_LAST_SCENE_SET1(idx), 0, 0, SCENE_COUNT_MAX - 1);
+
+    cluster->scene_count[1] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_SCENE_COUNT_SET2(idx), 0, 0, SCENE_COUNT_MAX);
+    cluster->scene_group_id[1] = switch_cluster_load_u16(
+        NV_ITEM_SWITCH_SCENE_GROUP_ID_SET2(idx), 0, 0, 0xFFFF);
+    cluster->scene_lockout_s[1] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_SCENE_LOCKOUT_SET2(idx), SCENE_LOCKOUT_DEFAULT_S,
+        SCENE_LOCKOUT_MIN_S, SCENE_LOCKOUT_MAX_S);
+    cluster->last_scene[1] = switch_cluster_load_u8(
+        NV_ITEM_SWITCH_LAST_SCENE_SET2(idx), SCENE_SET2_FIRST_ID,
+        SCENE_SET2_FIRST_ID, SCENE_SET2_FIRST_ID + SCENE_COUNT_MAX - 1);
+
+    cluster->current_scene[0] = cluster->last_scene[0];
+    cluster->current_scene[1] = cluster->last_scene[1];
+}
+
+// The on/off flag is written to NV only when it changes
+static void switch_cluster_set_onoff_flag(zigbee_switch_cluster *cluster,
+                                          uint8_t value) {
+    value = value ? 1 : 0;
+    if (cluster->onoff_flag == value) {
+        return;
+    }
+    cluster->onoff_flag = value;
+    switch_cluster_store_u8(NV_ITEM_SWITCH_ONOFF_FLAG(cluster->switch_idx),
+                            value);
+}
+
+// Indicator LED back to what it shows outside the special modes
+static void switch_cluster_restore_indicator(zigbee_switch_cluster *cluster) {
+    if (cluster->indicator_led == NULL) {
+        return;
+    }
+    if (hal_zigbee_get_network_status() == HAL_ZIGBEE_NETWORK_JOINED) {
+        led_off(cluster->indicator_led);
+        sync_switch_indicator_led(cluster);
+    } else {
+        // Same pattern as the "not connected" network indicator
+        led_blink(cluster->indicator_led, 500, 500, LED_BLINK_FOREVER);
+    }
+}
+
+static uint8_t switch_cluster_scene_first_id(uint8_t set) {
+    return set == 0 ? 0 : SCENE_SET2_FIRST_ID;
+}
+
+static void switch_cluster_recall_scene(zigbee_switch_cluster *cluster,
+                                        uint8_t set) {
+    if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
+        return;
+    }
+    hal_zigbee_cmd c = build_recall_scene_cmd(cluster->endpoint,
+                                              cluster->scene_group_id[set],
+                                              cluster->current_scene[set]);
+    hal_zigbee_send_cmd_to_bindings(&c);
+}
+
+static void switch_cluster_restart_lockout(zigbee_switch_cluster *cluster,
+                                           uint8_t set) {
+    hal_tasks_unschedule(&cluster->mode_task);
+    hal_tasks_schedule(&cluster->mode_task,
+                       (uint32_t)cluster->scene_lockout_s[set] * 1000);
+}
+
+// Double click (set 0) or Triple click (set 1) in normal mode
+static void switch_cluster_enter_scenes(zigbee_switch_cluster *cluster,
+                                        uint8_t set) {
+    uint8_t count = cluster->scene_count[set];
+
+    if (count == 0) {
+        return; // Set is off
+    }
+    if (hal_zigbee_get_network_status() != HAL_ZIGBEE_NETWORK_JOINED) {
+        return;
+    }
+
+    uint8_t first = switch_cluster_scene_first_id(set);
+    uint8_t last  = cluster->last_scene[set];
+
+    cluster->current_scene[set] =
+        (last >= first && last < first + count) ? last : first;
+    cluster->op_mode = set == 0 ? SWITCH_OP_MODE_SCENES_SET1
+                                : SWITCH_OP_MODE_SCENES_SET2;
+    switch_cluster_recall_scene(cluster, set);
+    switch_cluster_set_onoff_flag(cluster, 1);
+    switch_cluster_restart_lockout(cluster, set);
+    hal_tasks_unschedule(&cluster->led_task);
+    hal_tasks_schedule(&cluster->led_task, 0);
+}
+
+// Short click in scene mode: next scene of the set, wrapping
+static void switch_cluster_next_scene(zigbee_switch_cluster *cluster,
+                                      uint8_t set) {
+    uint8_t first = switch_cluster_scene_first_id(set);
+    uint8_t count = cluster->scene_count[set];
+
+    if (count == 0) {
+        switch_cluster_leave_op_mode(cluster);
+        return;
+    }
+    uint8_t idx = (uint8_t)(cluster->current_scene[set] - first);
+    cluster->current_scene[set] = first + (uint8_t)((idx + 1) % count);
+    switch_cluster_recall_scene(cluster, set);
+    switch_cluster_restart_lockout(cluster, set);
+}
+
+// Back to normal mode. Leaving a scene set stores its last scene, only if
+// it changed.
+static void switch_cluster_leave_op_mode(zigbee_switch_cluster *cluster) {
+    uint8_t prev = cluster->op_mode;
+
+    cluster->op_mode            = SWITCH_OP_MODE_NORMAL;
+    cluster->reset_wait_release = 0;
+    hal_tasks_unschedule(&cluster->mode_task);
+    hal_tasks_unschedule(&cluster->led_task);
+
+    if (prev == SWITCH_OP_MODE_SCENES_SET1 ||
+        prev == SWITCH_OP_MODE_SCENES_SET2) {
+        uint8_t set = prev == SWITCH_OP_MODE_SCENES_SET1 ? 0 : 1;
+        if (cluster->current_scene[set] != cluster->last_scene[set]) {
+            cluster->last_scene[set] = cluster->current_scene[set];
+            switch_cluster_store_u8(
+                set == 0 ? NV_ITEM_SWITCH_LAST_SCENE_SET1(cluster->switch_idx)
+                         : NV_ITEM_SWITCH_LAST_SCENE_SET2(cluster->switch_idx),
+                cluster->last_scene[set]);
+        }
+    }
+    if (prev != SWITCH_OP_MODE_NORMAL) {
+        switch_cluster_restore_indicator(cluster);
+    }
+}
+
+static void switch_cluster_led_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (cluster->op_mode != SWITCH_OP_MODE_SCENES_SET1 &&
+        cluster->op_mode != SWITCH_OP_MODE_SCENES_SET2) {
+        return;
+    }
+    if (cluster->indicator_led != NULL) {
+        led_blink(cluster->indicator_led, SCENE_LED_ON_MS, SCENE_LED_OFF_MS,
+                  cluster->op_mode == SWITCH_OP_MODE_SCENES_SET1 ? 2 : 3);
+    }
+    hal_tasks_schedule(&cluster->led_task, SCENE_LED_PERIOD_MS);
+}
+
+// Lockout expired (scene mode) or reset confirmation window over
+static void switch_cluster_mode_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+    bool in_click = cluster->button->pressed ||
+                    cluster->gesture_pending;
+
+    if (cluster->op_mode == SWITCH_OP_MODE_SCENES_SET1 ||
+        cluster->op_mode == SWITCH_OP_MODE_SCENES_SET2) {
+        if (in_click) {
+            // A click is under way: let it finish in scene mode
+            hal_tasks_schedule(&cluster->mode_task, 100);
+            return;
+        }
+        switch_cluster_leave_op_mode(cluster);
+    } else if (cluster->op_mode == SWITCH_OP_MODE_RESET_ARMED) {
+        if (cluster->reset_wait_release || in_click) {
+            return; // The gesture in progress decides
+        }
+        switch_cluster_leave_op_mode(cluster);
+    }
+}
+
+// Layer 2: a gesture confirmed after the multi-press window
+static void switch_cluster_on_click_gesture(zigbee_switch_cluster *cluster,
+                                            uint8_t count) {
+    switch (cluster->op_mode) {
+    case SWITCH_OP_MODE_NORMAL:
+        if (count == 1) {
+            // Short click: On/Off from the flag, no Read, no level
+            if (hal_zigbee_get_network_status() == HAL_ZIGBEE_NETWORK_JOINED) {
+                uint8_t cmd_id = cluster->onoff_flag ? ZCL_CMD_ONOFF_OFF
+                                                            : ZCL_CMD_ONOFF_ON;
+                hal_zigbee_cmd c = build_onoff_cmd(cluster->endpoint, cmd_id);
+                hal_zigbee_send_cmd_to_bindings(&c);
+                switch_cluster_set_onoff_flag(cluster, !cluster->onoff_flag);
+            }
+        } else if (count == 2) {
+            switch_cluster_enter_scenes(cluster, 0);
+        } else if (count == 3) {
+            switch_cluster_enter_scenes(cluster, 1);
+        }
+        break;
+
+    case SWITCH_OP_MODE_SCENES_SET1:
+    case SWITCH_OP_MODE_SCENES_SET2:
+        if (count == 1) {
+            switch_cluster_next_scene(
+                cluster, cluster->op_mode == SWITCH_OP_MODE_SCENES_SET1 ? 0 : 1);
+        }
+        // Double / Triple click: no effect
+        break;
+
+    case SWITCH_OP_MODE_RESET_ARMED:
+        if (count == 1 && (cluster->click_press_ms - cluster->reset_release_ms) <=
+            RESET_CONFIRM_WINDOW_MS) {
+            printf("Factory reset confirmed\r\n");
+            hal_factory_reset();
+        }
+        switch_cluster_leave_op_mode(cluster);
+        break;
+    }
+}
+
+// Layer 1: multi-press window expired after the last release
+static void switch_cluster_gesture_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (!cluster->gesture_pending) {
+        return;
+    }
+    cluster->gesture_pending = 0;
+
+    uint8_t count = cluster->gesture_count;
+    cluster->gesture_count = 0;
+
+    if (count == 1) {
+        switch_cluster_report_gesture(cluster, MULTISTATE_SINGLE_CLICK);
+    } else if (count == 2) {
+        switch_cluster_report_gesture(cluster, MULTISTATE_DOUBLE_CLICK);
+    } else if (count == 3) {
+        switch_cluster_report_gesture(cluster, MULTISTATE_TRIPLE_CLICK);
+    } else if (cluster->op_mode != SWITCH_OP_MODE_RESET_ARMED) {
+        return; // 4+ presses: ignored
+    }
+    switch_cluster_on_click_gesture(cluster, count);
+}
+
+// Layer 1: Very long hold, 15 s from the press edge (continues a Long click)
+static void switch_cluster_very_long_task_handler(void *arg) {
+    zigbee_switch_cluster *cluster = (zigbee_switch_cluster *)arg;
+
+    if (!cluster->button->pressed || !cluster->gesture_long ||
+        cluster->press_op_mode != SWITCH_OP_MODE_NORMAL ||
+        cluster->op_mode != SWITCH_OP_MODE_NORMAL) {
+        return; // Factory reset only from normal mode
+    }
+    printf("Very long hold: factory reset armed\r\n");
+    if (cluster->dim_hold) {
+        switch_cluster_end_dimming(cluster);
+        cluster->dim_hold = 0;
+    }
+    cluster->op_mode            = SWITCH_OP_MODE_RESET_ARMED;
+    cluster->reset_wait_release = 1;
+    hal_tasks_unschedule(&cluster->led_task);
+    if (cluster->indicator_led != NULL) {
+        led_blink(cluster->indicator_led, RESET_LED_ON_MS, RESET_LED_OFF_MS,
+                  LED_BLINK_FOREVER);
+    }
+}
+
+static void switch_cluster_gesture_on_press(zigbee_switch_cluster *cluster) {
+    uint32_t held = hal_millis() - cluster->button->pressed_at_ms;
+
+    if (cluster->gesture_pending) {
+        // Within the multi-press window of the previous release
+        hal_tasks_unschedule(&cluster->gesture_task);
+        cluster->gesture_pending = 0;
+        if (cluster->gesture_count < 255) {
+            cluster->gesture_count++;
+        }
+    } else {
+        cluster->gesture_count = 1;
+    }
+    cluster->gesture_long     = 0;
+    cluster->press_op_mode    = cluster->op_mode;
+    cluster->click_press_ms   = cluster->button->pressed_at_ms;
+    cluster->multistate_state = MULTISTATE_PRESS; // Not reported
+
+    hal_tasks_unschedule(&cluster->very_long_task);
+    hal_tasks_schedule(&cluster->very_long_task,
+                       held < VERY_LONG_HOLD_MS ? VERY_LONG_HOLD_MS - held : 0);
+
+    // Lamp state is only needed for dimming, i.e. a Long click in normal
+    // mode, which can only start a new sequence
+    if (cluster->op_mode == SWITCH_OP_MODE_NORMAL &&
+        cluster->gesture_count == 1) {
+        cluster->dim_regrab = cluster->last_dim_valid &&
+                              cluster->dimming_reset_window_ms > 0 &&
+                              (hal_millis() - cluster->last_dim_end_ms) <=
+                              cluster->dimming_reset_window_ms;
+        switch_cluster_request_lamp_state(cluster);
+    } else {
+        cluster->lamps_cnt = 0;
+    }
+}
+
+static void switch_cluster_gesture_on_long_press(zigbee_switch_cluster *cluster) {
+    // A hold always becomes a Long click; presses before it are dropped
+    cluster->gesture_long  = 1;
+    cluster->gesture_count = 0;
+    cluster->dim_active    = 0;
+
+    if (cluster->op_mode == SWITCH_OP_MODE_NORMAL) {
+        switch_cluster_level_control(cluster);
+        cluster->dim_hold = 1;
+    } else {
+        // Scene mode: exit without dimming. Reset armed: cancel.
+        switch_cluster_leave_op_mode(cluster);
+        cluster->dim_hold = 0;
+    }
+
+    cluster->multistate_state = MULTISTATE_LONG_PRESS;
+    hal_zigbee_notify_attribute_changed(cluster->endpoint,
+                                        ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+                                        ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+}
+
+static void switch_cluster_gesture_on_release(zigbee_switch_cluster *cluster) {
+    hal_tasks_unschedule(&cluster->very_long_task);
+
+    if (cluster->gesture_long) {
+        cluster->gesture_long = 0;
+        if (cluster->op_mode == SWITCH_OP_MODE_RESET_ARMED &&
+            cluster->reset_wait_release) {
+            // Armed at 15 s: the confirmation window starts at this release
+            uint32_t since = hal_millis() - cluster->button->released_at_ms;
+            cluster->reset_wait_release = 0;
+            cluster->reset_release_ms   = cluster->button->released_at_ms;
+            hal_tasks_unschedule(&cluster->mode_task);
+            hal_tasks_schedule(&cluster->mode_task,
+                               since < RESET_CONFIRM_WINDOW_MS
+                               ? RESET_CONFIRM_WINDOW_MS - since
+                               : 0);
+        } else if (cluster->dim_hold) {
+            switch_cluster_end_dimming(cluster);
+        }
+        cluster->dim_hold         = 0;
+        cluster->multistate_state = MULTISTATE_NOT_PRESSED;
+        hal_zigbee_notify_attribute_changed(
+            cluster->endpoint, ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
+            ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+        return;
+    }
+
+    // Short press released: wait for another press within the window,
+    // measured from the release edge
+    uint32_t since = hal_millis() - cluster->button->released_at_ms;
+
+    cluster->multistate_state = MULTISTATE_NOT_PRESSED; // Not reported
+    cluster->gesture_pending  = 1;
+    hal_tasks_unschedule(&cluster->gesture_task);
+    hal_tasks_schedule(&cluster->gesture_task,
+                       since < cluster->multi_press_window_ms
+                       ? cluster->multi_press_window_ms - since
+                       : 0);
 }
 
 void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
@@ -523,6 +1222,11 @@ void switch_cluster_on_button_press(zigbee_switch_cluster *cluster) {
         hal_zigbee_notify_attribute_changed(
             cluster->endpoint, ZCL_CLUSTER_MULTISTATE_INPUT_BASIC,
             ZCL_ATTR_MULTISTATE_INPUT_PRESENT_VALUE);
+        return;
+    }
+
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_gesture_on_press(cluster);
         return;
     }
 
@@ -577,6 +1281,11 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         return;
     }
 
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_gesture_on_release(cluster);
+        return;
+    }
+
     if (cluster->multistate_state != MULTISTATE_LONG_PRESS) {
         if (cluster->relay_mode == ZCL_ONOFF_CONFIGURATION_RELAY_MODE_SHORT) {
             switch_cluster_relay_action_on(cluster);
@@ -586,10 +1295,7 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
         }
     } else {
         // This is end of long press, send zcl_level stop
-        hal_tasks_unschedule(&cluster->dim_up_task);
-        switch_cluster_level_stop(cluster);
-        cluster->last_dim_valid  = 1;
-        cluster->last_dim_end_ms = hal_millis();
+        switch_cluster_end_dimming(cluster);
     }
 
     cluster->multistate_state = MULTISTATE_NOT_PRESSED;
@@ -601,6 +1307,11 @@ void switch_cluster_on_button_release(zigbee_switch_cluster *cluster) {
 void switch_cluster_on_button_long_press(zigbee_switch_cluster *cluster) {
     if (cluster->mode == ZCL_ONOFF_CONFIGURATION_SWITCH_TYPE_TOGGLE) {
         // Toggle does not support modes (RISE, SHORT, LONG)
+        return;
+    }
+
+    if (switch_cluster_gestures_active(cluster)) {
+        switch_cluster_gesture_on_long_press(cluster);
         return;
     }
 
@@ -661,6 +1372,9 @@ void switch_cluster_on_write_attr(zigbee_switch_cluster *cluster,
         switch_cluster_store_dimming_window_to_nv(cluster);
         return;
     }
+    if (switch_cluster_on_write_gesture_attr(cluster, attribute_id)) {
+        return;
+    }
     if (attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_RELAY_INDEX) {
         if (relay_clusters_cnt == 0) {
             cluster->relay_index = 0;
@@ -676,7 +1390,89 @@ void switch_cluster_on_write_attr(zigbee_switch_cluster *cluster,
             cluster->button->pressed_when_high = 0;
         }
     }
+    if (!switch_cluster_gestures_active(cluster)) {
+        // Gestures switched off (mode, relay mode or binded mode changed)
+        hal_tasks_unschedule(&cluster->gesture_task);
+        hal_tasks_unschedule(&cluster->very_long_task);
+        cluster->gesture_pending = 0;
+        cluster->gesture_count   = 0;
+        cluster->gesture_long    = 0;
+        if (cluster->op_mode != SWITCH_OP_MODE_NORMAL) {
+            switch_cluster_leave_op_mode(cluster);
+        }
+    }
     switch_cluster_store_attrs_to_nv(cluster);
+}
+
+// Multi-press settings: each one in its own NV item. Returns true if the
+// attribute was one of them.
+static bool switch_cluster_on_write_gesture_attr(zigbee_switch_cluster *cluster,
+                                                 uint16_t attribute_id) {
+    uint8_t idx = cluster->switch_idx;
+
+    switch (attribute_id) {
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_SYNC:
+        cluster->dimming_sync = cluster->dimming_sync ? 1 : 0;
+        switch_cluster_store_u8(NV_ITEM_SWITCH_DIMMING_SYNC(idx),
+                                cluster->dimming_sync);
+        return true;
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_MULTI_PRESS_WINDOW:
+        if (cluster->multi_press_window_ms < MULTI_PRESS_WINDOW_MIN_MS) {
+            cluster->multi_press_window_ms = MULTI_PRESS_WINDOW_MIN_MS;
+        } else if (cluster->multi_press_window_ms > MULTI_PRESS_WINDOW_MAX_MS) {
+            cluster->multi_press_window_ms = MULTI_PRESS_WINDOW_MAX_MS;
+        }
+        switch_cluster_store_u16(NV_ITEM_SWITCH_MULTI_PRESS_WINDOW(idx),
+                                 cluster->multi_press_window_ms);
+        return true;
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET1:
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET2: {
+        uint8_t set =
+            attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET1
+            ? 0 : 1;
+        if (cluster->scene_count[set] > SCENE_COUNT_MAX) {
+            cluster->scene_count[set] = SCENE_COUNT_MAX;
+        }
+        // Leave the set if it is in use, so it restarts with the new count
+        if (cluster->op_mode == (set == 0 ? SWITCH_OP_MODE_SCENES_SET1
+                                          : SWITCH_OP_MODE_SCENES_SET2)) {
+            switch_cluster_leave_op_mode(cluster);
+        }
+        switch_cluster_store_u8(set == 0 ? NV_ITEM_SWITCH_SCENE_COUNT_SET1(idx)
+                                         : NV_ITEM_SWITCH_SCENE_COUNT_SET2(idx),
+                                cluster->scene_count[set]);
+        return true;
+    }
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET1:
+        switch_cluster_store_u16(NV_ITEM_SWITCH_SCENE_GROUP_ID_SET1(idx),
+                                 cluster->scene_group_id[0]);
+        return true;
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET2:
+        switch_cluster_store_u16(NV_ITEM_SWITCH_SCENE_GROUP_ID_SET2(idx),
+                                 cluster->scene_group_id[1]);
+        return true;
+
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET1:
+    case ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET2: {
+        uint8_t set =
+            attribute_id == ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET1
+            ? 0 : 1;
+        if (cluster->scene_lockout_s[set] < SCENE_LOCKOUT_MIN_S) {
+            cluster->scene_lockout_s[set] = SCENE_LOCKOUT_MIN_S;
+        } else if (cluster->scene_lockout_s[set] > SCENE_LOCKOUT_MAX_S) {
+            cluster->scene_lockout_s[set] = SCENE_LOCKOUT_MAX_S;
+        }
+        switch_cluster_store_u8(set == 0 ? NV_ITEM_SWITCH_SCENE_LOCKOUT_SET1(idx)
+                                         : NV_ITEM_SWITCH_SCENE_LOCKOUT_SET2(idx),
+                                cluster->scene_lockout_s[set]);
+        return true;
+    }
+    }
+    return false;
 }
 
 zigbee_switch_cluster_config nv_config_buffer;

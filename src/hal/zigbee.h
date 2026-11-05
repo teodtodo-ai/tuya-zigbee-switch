@@ -190,6 +190,8 @@ void hal_zigbee_register_on_zcl_activity_callback(
 /**
  * Function called for each attribute record of an incoming ZCL Read
  * Attributes Response (e.g. answer from a bound lamp).
+ * @param src_addr Short (network) address of the device that answered, so
+ *                 answers from several bound lamps can be told apart
  * @param endpoint Local (destination) endpoint the response arrived at
  * @param cluster_id Cluster of the response
  * @param attribute_id Attribute in this record
@@ -197,7 +199,8 @@ void hal_zigbee_register_on_zcl_activity_callback(
  * @param data_type ZCL data type (valid only when status == 0)
  * @param value Pointer to raw little-endian value (NULL when status != 0)
  */
-typedef void (*hal_zigbee_read_rsp_callback_t)(uint8_t endpoint,
+typedef void (*hal_zigbee_read_rsp_callback_t)(uint16_t src_addr,
+                                               uint8_t endpoint,
                                                uint16_t cluster_id,
                                                uint16_t attribute_id,
                                                uint8_t status,

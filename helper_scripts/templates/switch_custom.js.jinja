@@ -134,15 +134,84 @@ const romasku = {
             valueMax: 5000,
             entityCategory: "config",
         }),
+    dimmingSync: (name, endpointName) =>
+        binary({
+            name,
+            endpointName,
+            valueOn: ["ON", 1],
+            valueOff: ["OFF", 0],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: 0xff82, type: 0x10 }, // Boolean, custom firmware only
+            description:
+                "Long press on lit lamps: first set all of them to their average level, then dim them together. " +
+                "OFF = each lamp dims from its own level (custom firmware only)",
+            access: "ALL",
+            entityCategory: "config",
+        }),
+    multiPressWindow: (name, endpointName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: 0xff83, type: 0x21 }, // uint16, custom firmware only
+            description:
+                "Double/triple click: maximum time from a release to the next press. A click is confirmed " +
+                "when this time passes after the last release (momentary, relay detached, binded short press; custom firmware only)",
+            unit: "ms",
+            valueMin: 100,
+            valueMax: 400,
+            entityCategory: "config",
+        }),
+    sceneCount: (name, endpointName, attrId, setName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: attrId, type: 0x20 }, // uint8, custom firmware only
+            description: `Number of stored scenes in ${setName}; 0 = scene set off (custom firmware only)`,
+            valueMin: 0,
+            valueMax: 10,
+            entityCategory: "config",
+        }),
+    sceneGroupId: (name, endpointName, attrId, setName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: attrId, type: 0x21 }, // uint16, custom firmware only
+            description:
+                `Group ID sent in RecallScene for ${setName}: the group the scenes were stored in, ` +
+                "0 for scenes stored on the lamps directly (custom firmware only)",
+            valueMin: 0,
+            valueMax: 65535,
+            entityCategory: "config",
+        }),
+    sceneLockout: (name, endpointName, attrId, setName) =>
+        numeric({
+            name,
+            endpointNames: [endpointName],
+            cluster: "genOnOffSwitchCfg",
+            attribute: { ID: attrId, type: 0x20 }, // uint8, custom firmware only
+            description: `Scene mode of ${setName} ends this long after the last click (custom firmware only)`,
+            unit: "s",
+            valueMin: 5,
+            valueMax: 15,
+            entityCategory: "config",
+        }),
     pressAction: (name, endpointName) =>
         enumLookup({
             name,
             endpointName,
             access: "STATE_GET",
-            lookup: { released: 0, press: 1, long_press: 2, position_on: 3, position_off: 4 },
+            lookup: {
+                released: 0, press: 1, long_press: 2, position_on: 3, position_off: 4,
+                single_click: 5, double_click: 6, triple_click: 7,
+            },
             cluster: "genMultistateInput",
             attribute: "presentValue",
-            description: "Action of the switch: 'released' or 'press' or 'long_press'",
+            description:
+                "Action of the switch: 'released', 'press', 'long_press'; with multi-press gestures also " +
+                "'single_click', 'double_click', 'triple_click'",
             entityCategory: "diagnostic",
         }),
     relayIndicatorMode: (name, endpointName) =>
@@ -501,6 +570,14 @@ const definitions = [
             romasku.levelMoveRate("{{switchName}}_level_move_rate", "{{switchName}}"),
             romasku.dimmingThreshold("{{switchName}}_dimming_threshold", "{{switchName}}"),
             romasku.dimmingResetWindow("{{switchName}}_dimming_reset_window", "{{switchName}}"),
+            romasku.dimmingSync("{{switchName}}_dimming_sync", "{{switchName}}"),
+            romasku.multiPressWindow("{{switchName}}_multi_press_window", "{{switchName}}"),
+            romasku.sceneCount("{{switchName}}_scene_count_set1", "{{switchName}}", 0xff84, "set 1 (double click, scenes 0-9)"),
+            romasku.sceneGroupId("{{switchName}}_scene_group_id_set1", "{{switchName}}", 0xff85, "set 1"),
+            romasku.sceneLockout("{{switchName}}_scene_lockout_set1", "{{switchName}}", 0xff86, "set 1"),
+            romasku.sceneCount("{{switchName}}_scene_count_set2", "{{switchName}}", 0xff87, "set 2 (triple click, scenes 10-19)"),
+            romasku.sceneGroupId("{{switchName}}_scene_group_id_set2", "{{switchName}}", 0xff88, "set 2"),
+            romasku.sceneLockout("{{switchName}}_scene_lockout_set2", "{{switchName}}", 0xff89, "set 2"),
             {% endfor %}
             {% for relayName in device.relayIndicatorNames %}
             romasku.relayIndicatorMode("{{relayName}}_indicator_mode", "{{relayName}}"),

@@ -13,6 +13,7 @@
 #define ZCL_CLUSTER_MULTISTATE_INPUT_BASIC    0x0012
 #define ZCL_CLUSTER_LEVEL_CONTROL             0x0008
 #define ZCL_CLUSTER_GROUPS                    0x0004
+#define ZCL_CLUSTER_SCENES                    0x0005
 #define ZCL_CLUSTER_OTA_BOOTLOAD              0x0019
 #define ZCL_CLUSTER_WINDOW_COVERING           0x0102
 #define ZCL_CLUSTER_COVER_SWITCH_CONFIG       0xFC01
@@ -80,6 +81,16 @@
 #define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_THRESHOLD       0xff80
 // Custom (fork): re-press within this many ms after a dim keeps its direction
 #define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_RESET_WINDOW    0xff81
+// Custom (fork): multi-press gestures and scenes (momentary, relay detached,
+// binded mode short). See switch_cluster.c.
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_DIMMING_SYNC            0xff82
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_MULTI_PRESS_WINDOW      0xff83
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET1        0xff84
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET1     0xff85
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET1      0xff86
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_COUNT_SET2        0xff87
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_GROUP_ID_SET2     0xff88
+#define ZCL_ATTR_ONOFF_CONFIGURATION_SWITCH_SCENE_LOCKOUT_SET2      0xff89
 
 // Level control cluster attributes
 #define ZCL_ATTR_LEVEL_CURRENT_LEVEL                                0x0000
@@ -208,6 +219,10 @@
 #define ZCL_CMD_OFF_WITH_EFFECT                0x40
 #define ZCL_CMD_ON_WITH_RECALL_GLOBAL_SCENE    0x41
 #define ZCL_CMD_ON_WITH_TIMED_OFF              0x42
+
+// Scenes Cluster
+
+#define ZCL_CMD_SCENES_RECALL_SCENE    0x05
 
 // Level Cluster
 

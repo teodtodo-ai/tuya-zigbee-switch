@@ -322,10 +322,11 @@ static int cmd_zcl_cmd_no_activity(int argc, char **argv) {
 // Simulate an incoming Read Attributes Response record from a bound device.
 // Usage: zcl_read_rsp <ep:dec> <cluster:hex> <attr:hex> <status:hex>
 //                     <type:hex> [value bytes hex...]
-static int cmd_zcl_read_rsp(int argc, char **argv) {
+// The answer comes from short address 0x0000 (one lamp).
+static int cmd_zcl_read_rsp_impl(uint16_t src_addr, int argc, char **argv) {
     if (argc < 6) {
-        fprintf(stderr, "Usage: zcl_read_rsp <ep:dec> <cluster:hex> <attr:hex> "
-                "<status:hex> <type:hex> [value:hex_bytes...]\n");
+        fprintf(stderr, "Usage: zcl_read_rsp [src:hex] <ep:dec> <cluster:hex> "
+                "<attr:hex> <status:hex> <type:hex> [value:hex_bytes...]\n");
         io_res_err("usage");
         return -1;
     }
@@ -354,11 +355,27 @@ static int cmd_zcl_read_rsp(int argc, char **argv) {
         value[value_len++] = (uint8_t)byte_val;
     }
 
-    stub_zigbee_simulate_read_rsp(ep, cluster, attr, (uint8_t)status,
+    stub_zigbee_simulate_read_rsp(src_addr, ep, cluster, attr, (uint8_t)status,
                                   (uint8_t)type, value);
-    io_res_ok("ep=%d cluster=0x%04X attr=0x%04X status=0x%02X", ep, cluster,
-              attr, status);
+    io_res_ok("src=0x%04X ep=%d cluster=0x%04X attr=0x%04X status=0x%02X",
+              src_addr, ep, cluster, attr, status);
     return 0;
+}
+
+static int cmd_zcl_read_rsp(int argc, char **argv) {
+    return cmd_zcl_read_rsp_impl(0x0000, argc, argv);
+}
+
+// Same, from a given lamp: zcl_read_rsp_src <src:hex> <ep:dec> ...
+static int cmd_zcl_read_rsp_src(int argc, char **argv) {
+    uint16_t src;
+
+    if (argc < 2 || parse_u16_hex(argv[1], &src)) {
+        fprintf(stderr, "Usage: zcl_read_rsp_src <src:hex> <ep:dec> ...\n");
+        io_res_err("usage");
+        return -1;
+    }
+    return cmd_zcl_read_rsp_impl(src, argc - 1, argv + 1);
 }
 
 static int cmd_freeze_time(int argc, char **argv) {
@@ -434,6 +451,7 @@ static const SimpleReplCommand kCmds[] = {
     { "zcl_cmd",             cmd_zcl_cmd             },
     { "zcl_cmd_no_activity", cmd_zcl_cmd_no_activity },
     { "zcl_read_rsp",        cmd_zcl_read_rsp        },
+    { "zcl_read_rsp_src",    cmd_zcl_read_rsp_src    },
     { "freeze_time",         cmd_freeze_time         },
     { "step_time",           cmd_step_time           },
     { "set_battery_voltage", cmd_set_battery_voltage },

@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define MAX_CLUSTERS    32
-#define MAX_ATTRS       128
+#define MAX_ATTRS       176
 
 sl_zigbee_af_endpoint_type_t      endpoint_type_buffer[ZCL_FIXED_ENDPOINT_COUNT];
 sl_zigbee_af_cluster_t            clusters_buffer[MAX_CLUSTERS];

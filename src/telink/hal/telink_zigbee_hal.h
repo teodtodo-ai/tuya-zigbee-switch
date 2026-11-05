@@ -12,7 +12,7 @@
 #define MAX_ENDPOINTS         8
 #define MAX_IN_CLUSTERS       32
 #define MAX_OUT_CLUSTERS      32
-#define MAX_ATTRS             128
+#define MAX_ATTRS             176     // fork (was 128): 18 switch config attrs per switch
 #define OTA_QUERY_INTERVAL    15 * 60 // 15 minutes
 
 // Network module functions (implemented in zigbee_network.c)

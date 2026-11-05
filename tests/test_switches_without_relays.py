@@ -107,7 +107,9 @@ def test_button_press_no_crash(device: Device, button_pins: list[str]):
         ),
         pytest.param(
             ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT,
-            lambda d, pin: d.click_button(pin),
+            # Fork: momentary + detached + short press uses multi-press
+            # gestures, the click is confirmed after the multi-press window
+            lambda d, pin: (d.click_button(pin), d.step_time(300)),
             id="short",
         ),
         pytest.param(
@@ -132,6 +134,9 @@ def test_binding_commands_still_sent(
     device.set_network(1)
     device.clear_events()
     trigger(device, button_pins[0])
+    if binded_mode == ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT:
+        # Fork: a Short click sends On/Off from the on/off flag (starts at 0)
+        expected_cmd = ZCL_CMD_ONOFF_ON
     device.wait_for_cmd_send(1, ZCL_CLUSTER_ON_OFF, expected_cmd)
 
 
@@ -152,7 +157,9 @@ def test_binding_commands_still_sent(
         ),
         pytest.param(
             ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT,
-            lambda d, pin: d.click_button(pin),
+            # Fork: momentary + detached + short press uses multi-press
+            # gestures, the click is confirmed after the multi-press window
+            lambda d, pin: (d.click_button(pin), d.step_time(300)),
             id="short",
         ),
         pytest.param(
@@ -176,7 +183,11 @@ def test_smart_sync_degrades_to_toggle(
     device.set_network(1)
     device.clear_events()
     trigger(device, button_pins[0])
-    device.wait_for_cmd_send(1, ZCL_CLUSTER_ON_OFF, ZCL_CMD_ONOFF_TOGGLE)
+    expected_cmd = ZCL_CMD_ONOFF_TOGGLE
+    if binded_mode == ZCL_ONOFF_CONFIGURATION_BINDED_MODE_SHORT:
+        # Fork: a Short click sends On/Off from the on/off flag (starts at 0)
+        expected_cmd = ZCL_CMD_ONOFF_ON
+    device.wait_for_cmd_send(1, ZCL_CLUSTER_ON_OFF, expected_cmd)
 
 
 def test_extra_switches_are_detached_when_relays_are_missing():

@@ -163,15 +163,16 @@ static void zcl_incoming_message_callback(zclIncoming_t *pInHdlrMsg) {
             return;
         }
         zclReadRspCmd_t *rsp = (zclReadRspCmd_t *)pInHdlrMsg->attrCmd;
+        u16 src_addr         = pInHdlrMsg->msg->indInfo.src_short_addr;
         for (u8 i = 0; i < rsp->numAttr; i++) {
             zclReadRspStatus_t *rec = &rsp->attrList[i];
             if (rec->status == ZCL_STA_SUCCESS) {
-                read_rsp_callback(pInHdlrMsg->msg->indInfo.dst_ep,
+                read_rsp_callback(src_addr, pInHdlrMsg->msg->indInfo.dst_ep,
                                   pInHdlrMsg->msg->indInfo.cluster_id,
                                   rec->attrID, rec->status, rec->dataType,
                                   rec->data);
             } else {
-                read_rsp_callback(pInHdlrMsg->msg->indInfo.dst_ep,
+                read_rsp_callback(src_addr, pInHdlrMsg->msg->indInfo.dst_ep,
                                   pInHdlrMsg->msg->indInfo.cluster_id,
                                   rec->attrID, rec->status, 0, NULL);
             }
