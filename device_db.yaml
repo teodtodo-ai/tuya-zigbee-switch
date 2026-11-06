@@ -3187,6 +3187,39 @@ OUTLET_BSEED_PM_TS011F_2uollq9d:
   info: "Same board and pinout as the _TZ3000_4ux0ondb revision (network LED C3, switch B5, relay D2, relay indicator B4, both PWM-dimmable, energy CF=C0 CF1=C2 SEL=C1) but fitted with a BL0937 instead of an HLW8012. Ships factory-calibrated: the multipliers are compiled into the firmware (hlw8012_*/bl0942_* fields in device_db), so a freshly flashed device reads correctly straight away and the config_str stays short enough to be read over Zigbee in one packet. Fine-tune per unit via the calibrate fields; a calibration stored in NVM (calibration_values) always takes precedence over the compiled default. Hardware-confirmed working with the default SEL polarity, i.e. no `I` flag needed — the BL0937 here maps CF1 the same way the HLW8012 does. Should a unit ever report voltage and current swapped, append `I` to the EP token (EPC0C2C1I) to flip that mapping. "
   threads: null
   store: null
+OUTLET_BSEED_PM_TS011F_5ct6e7ye:
+  human_name: BSEED PM wall socket with USB (ZT2S)
+  category: outlet
+  power: mains
+  neutral: required
+  output: relay
+  device_type: router
+  stock_model_name: TS011F
+  stock_manufacturer_name: _TZ3210_5ct6e7ye
+  stock_converter_manufacturer: Tuya
+  stock_converter_model: TS011F_plug_1
+  override_z2m_device: TS011F_plug_1_2
+  tuya_module: ZT2S
+  mcu_family: Telink
+  mcu: TLSR8258
+  # Pin-discovery build. ZT2S exposes only C2, C3, D2, C4, B4, B5, B7 (RX),
+  # B1 (TX) and SWS. LED/relay/indicator follow the two hardware-verified BSEED
+  # revisions; the energy pins are a first guess and are changed at runtime
+  # through device_config. No switch token on purpose: without a button there
+  # is no multi-press factory reset, so a wrong input pin cannot make the
+  # device leave the network. See docs/devices/bseed_socket_5ct6e7ye.md.
+  config_str: 5ct6e7ye;TS011F-BS-PM-5;LC3p;RD2;IB4p;EPC4C2B1;
+  alt_config_str: null
+  old_manufacturer_names: null
+  old_zb_models: null
+  stock_manufacturer_id: 4417
+  stock_image_type: 54179
+  firmware_image_type: 47500
+  build: no
+  status: in_progress
+  info: "Pin discovery in progress on one test unit (teodtodo-ai fork). Module Tuya ZT2S (Telink). Energy-metering chip not identified yet; pins unverified."
+  threads: null
+  store: null
 OUTLET_BSEED_TS011F:
   human_name: BSEED outlet
   category: outlet

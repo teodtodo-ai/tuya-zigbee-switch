@@ -1,0 +1,109 @@
+name: Build BSEED socket test firmware
+
+# Fork-only workflow (teodtodo-ai): builds just the BSEED socket
+# _TZ3210_5ct6e7ye (pin-discovery build on the "socket BSEED test" unit),
+# uploads the OTA files as an artifact and publishes them, together with a
+# ready-to-use Z2M index, to the separate branch "smart-dimming-ota" in the
+# folder <commit>/socket_test/. No other branch is written.
+
+on:
+  push:
+    branches:
+      - socket-discovery
+  workflow_dispatch:
+
+permissions:
+  contents: write # only used to push to the smart-dimming-ota branch
+
+env:
+  BOARD: OUTLET_BSEED_PM_TS011F_5ct6e7ye
+  # Base of this branch (HobboRobin main). board.mk derives the low byte of the
+  # OTA file version from "commits ahead of origin/main"; on this branch that is
+  # >255 and would overflow, so the counter is taken from this fixed base.
+  VERSION_BASE: 235e2927a
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make python3 python3-venv yq unzip wget
+
+      - name: Cache Telink Tools
+        uses: actions/cache@v4
+        with:
+          path: telink_tools
+          key: telink-tools-v3.7.2.0
+
+      - name: Install Telink SDK, toolchain and Python env
+        run: |
+          make telink/tools/all
+          make setup_venv
+
+      - name: Build socket (router)
+        run: |
+          source .venv/bin/activate
+          STACK_BUILD=$(git rev-list --count "$VERSION_BASE"..HEAD)
+          echo "STACK_BUILD=$STACK_BUILD"
+          if [ "$STACK_BUILD" -gt 255 ]; then echo "version counter overflow"; exit 1; fi
+          BOARD=$BOARD DEVICE_TYPE=router make board/build STACK_BUILD=$STACK_BUILD
+          ls -l bin/router/$BOARD/
+
+      - name: Show version info
+        run: |
+          echo "HEAD: $(git rev-parse --short HEAD)"
+          sha256sum bin/router/$BOARD/*
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: bseed-socket-${{ github.sha }}
+          path: bin/router/${{ env.BOARD }}/
+          if-no-files-found: error
+
+      - name: Publish OTA files to smart-dimming-ota branch
+        run: |
+          set -e
+          source .venv/bin/activate
+          SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          DEST="$SHA/socket_test"
+          BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/smart-dimming-ota/$DEST"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin smart-dimming-ota >/dev/null; then
+            git fetch origin smart-dimming-ota
+            git worktree add ota_publish origin/smart-dimming-ota
+            cd ota_publish
+            git checkout -B smart-dimming-ota
+          else
+            git worktree add --detach ota_publish
+            cd ota_publish
+            git checkout --orphan smart-dimming-ota
+            git rm -rqf .
+          fi
+          mkdir -p "$DEST"
+          cp ../bin/router/$BOARD/*.zigbee "$DEST/"
+          cd "$DEST"
+          # One Z2M index for this unit: the stock->custom migration file
+          # (stock image type, version 0xFFFFFFFF) and the normal custom file.
+          for f in *.zigbee; do
+            case "$f" in *-forced.zigbee) continue ;; esac
+            python3 ../../../helper_scripts/make_z2m_ota_index.py \
+              --db_file ../../../device_db.yaml --board "$BOARD" \
+              --base-url "$BASE_URL" "$f" index_socket_test.json
+          done
+          sha256sum *.zigbee > SHA256SUMS
+          echo "source commit: $FULL_SHA" > BUILD_INFO.txt
+          cd ../..
+          git add "$DEST"
+          git commit -m "OTA files for socket-discovery $SHA"
+          git push origin smart-dimming-ota
