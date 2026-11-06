@@ -1,0 +1,107 @@
+name: Build BSEED socket romasku test firmware
+
+# Fork-only workflow (teodtodo-ai): builds just the BSEED socket
+# _TZ3210_5ct6e7ye from plain romasku (base-firmware test on the
+# "socket BSEED test" unit, no energy metering), uploads the OTA files as an
+# artifact and publishes them, together with a Z2M index for the forced file,
+# to the separate branch "smart-dimming-ota" in the folder
+# <commit>/socket_romasku/. No other branch is written.
+
+on:
+  push:
+    branches:
+      - socket-romasku
+  workflow_dispatch:
+
+permissions:
+  contents: write # only used to push to the smart-dimming-ota branch
+
+env:
+  BOARD: OUTLET_BSEED_PM_TS011F_5ct6e7ye
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y make python3 python3-venv yq unzip wget
+
+      - name: Cache Telink Tools
+        uses: actions/cache@v4
+        with:
+          path: telink_tools
+          key: telink-tools-v3.7.2.0
+
+      - name: Install Telink SDK, toolchain and Python env
+        run: |
+          make telink/tools/all
+          make setup_venv
+
+      - name: Build socket (router)
+        run: |
+          source .venv/bin/activate
+          STACK_BUILD=$(git rev-list --count origin/main..HEAD)
+          echo "STACK_BUILD=$STACK_BUILD"
+          if [ "$STACK_BUILD" -gt 255 ]; then echo "version counter overflow"; exit 1; fi
+          BOARD=$BOARD DEVICE_TYPE=router make board/build
+          ls -l bin/router/$BOARD/
+
+      - name: Show version info
+        run: |
+          echo "HEAD: $(git rev-parse --short HEAD)"
+          sha256sum bin/router/$BOARD/*
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: bseed-socket-romasku-${{ github.sha }}
+          path: bin/router/${{ env.BOARD }}/
+          if-no-files-found: error
+
+      - name: Publish OTA files to smart-dimming-ota branch
+        run: |
+          set -e
+          source .venv/bin/activate
+          SHA=$(git rev-parse --short HEAD)
+          FULL_SHA=$(git rev-parse HEAD)
+          DEST="$SHA/socket_romasku"
+          BASE_URL="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/refs/heads/smart-dimming-ota/$DEST"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git ls-remote --exit-code --heads origin smart-dimming-ota >/dev/null; then
+            git fetch origin smart-dimming-ota
+            git worktree add ota_publish origin/smart-dimming-ota
+            cd ota_publish
+            git checkout -B smart-dimming-ota
+          else
+            git worktree add --detach ota_publish
+            cd ota_publish
+            git checkout --orphan smart-dimming-ota
+            git rm -rqf .
+          fi
+          mkdir -p "$DEST"
+          cp ../bin/router/$BOARD/*.zigbee "$DEST/"
+          cd "$DEST"
+          # Z2M index with the forced file only (image type 47500, version
+          # 0xFFFFFFFF): the unit runs the HobboRobin build 1.3.0 with the same
+          # image type, and this romasku 1.1.3 build has a lower version, so
+          # only the forced file is accepted.
+          for f in *-forced.zigbee; do
+            python3 ../../../helper_scripts/make_z2m_ota_index.py \
+              --db_file ../../../device_db.yaml --board "$BOARD" \
+              --base-url "$BASE_URL" "$f" index_socket_romasku.json
+          done
+          sha256sum *.zigbee > SHA256SUMS
+          echo "source commit: $FULL_SHA" > BUILD_INFO.txt
+          cd ../..
+          git add "$DEST"
+          git commit -m "OTA files for socket-romasku $SHA"
+          git push origin smart-dimming-ota

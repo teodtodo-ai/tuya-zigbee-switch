@@ -3194,6 +3194,38 @@ OUTLET_BSEED_PM_TS011F_2:
   - https://github.com/romasku/tuya-zigbee-switch/pull/397
   store:
   - https://www.aliexpress.com/item/1005005714480181.html
+OUTLET_BSEED_PM_TS011F_5ct6e7ye:
+  human_name: BSEED PM wall socket with USB (ZT2S)
+  category: outlet
+  power: mains
+  neutral: required
+  output: relay
+  device_type: router
+  stock_model_name: TS011F
+  stock_manufacturer_name: _TZ3210_5ct6e7ye
+  stock_converter_manufacturer: Tuya
+  stock_converter_model: TS011F_plug_1
+  override_z2m_device: TS011F_plug_1_2
+  tuya_module: ZT2S_real
+  mcu_family: Telink
+  mcu: TLSR8258
+  # Base-firmware test on one unit (teodtodo-ai fork): plain romasku, no energy
+  # metering. Same image type as the HobboRobin discovery build (47500) so the
+  # forced OTA is accepted. The unit keeps the config_str stored in its NVM;
+  # this compiled-in string only applies to a chip with an empty NVM.
+  # See docs/devices/bseed_socket_5ct6e7ye.md in the socket-discovery branch.
+  config_str: 5ct6e7ye;TS011F-BS-PM-5;LC3;RD2;IB4;
+  alt_config_str: null
+  old_manufacturer_names: null
+  old_zb_models: null
+  stock_manufacturer_id: 4417
+  stock_image_type: 54179
+  firmware_image_type: 47500
+  build: no
+  status: in_progress
+  info: "Base-firmware test on one unit (teodtodo-ai fork); pins unverified, no metering."
+  threads: null
+  store: null
 OUTLET_BSEED_TS011F:
   human_name: BSEED outlet
   category: outlet
