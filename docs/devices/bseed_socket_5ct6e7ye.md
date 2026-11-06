@@ -93,6 +93,16 @@ First guess (compiled-in default of the discovery build):
   Before adding the button (`SB5u`), set `multi_press_reset_count` to 0.
 - If the metering chip is a UART type, the natural candidate is
   `EBB1B7` (TX=B1, RX=B7).
+- **Overload protection stays at its defaults** (10 A for 30 s / 16 A peak;
+  it cannot be switched off, only raised with an `OL` token). With wrong
+  metering pins the readings are meaningless and can trip it — e.g. CF1 right
+  but SEL wrong turns ~224 V of voltage pulses into ~17 A of "current" and the
+  relay switches off on its own (reconnect after 60 s, lock-out after 5 trips).
+  **On every test, check `overload_alarm` in Z2M** before concluding that the
+  relay pin is wrong. If it gets in the way, append `OLC65000P65000`
+  (caps above anything the code can compute: 54 A / 6380 W) — discovery only.
+- Test with nothing plugged in: SEL toggles B1 every ~25 s, and on another
+  ZT2S device (Girier) B1 is a button input.
 
 Test log (fill in on every test):
 

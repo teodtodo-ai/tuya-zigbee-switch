@@ -3199,7 +3199,7 @@ OUTLET_BSEED_PM_TS011F_5ct6e7ye:
   stock_converter_manufacturer: Tuya
   stock_converter_model: TS011F_plug_1
   override_z2m_device: TS011F_plug_1_2
-  tuya_module: ZT2S
+  tuya_module: ZT2S_real
   mcu_family: Telink
   mcu: TLSR8258
   # Pin-discovery build. ZT2S exposes only C2, C3, D2, C4, B4, B5, B7 (RX),
